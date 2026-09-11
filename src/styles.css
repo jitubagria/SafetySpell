@@ -1,0 +1,141 @@
+@import "tailwindcss" source(none);
+@source "../src";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --font-sans: "Atkinson Hyperlegible", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Public Sans", ui-sans-serif, system-ui, sans-serif;
+  --radius-sm: calc(var(--radius) - 2px);
+  --radius-md: var(--radius);
+  --radius-lg: calc(var(--radius) + 2px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--surface);
+  --color-card-foreground: var(--foreground);
+  --color-popover: var(--surface);
+  --color-popover-foreground: var(--foreground);
+  --color-primary: var(--category);
+  --color-primary-foreground: var(--category-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--category-soft);
+  --color-accent-foreground: var(--category);
+  --color-destructive: var(--emergency);
+  --color-destructive-foreground: var(--emergency-foreground);
+  --color-border: var(--border);
+  --color-input: var(--border);
+  --color-ring: var(--category);
+  --color-surface: var(--surface);
+  --color-app: var(--app);
+  --color-category: var(--category);
+  --color-category-soft: var(--category-soft);
+  --color-emergency: var(--emergency);
+  --color-emergency-foreground: var(--emergency-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --shadow-soft: 0 8px 28px color-mix(in oklab, var(--foreground) 8%, transparent);
+  --shadow-emergency: 0 8px 18px color-mix(in oklab, var(--emergency) 28%, transparent);
+}
+
+:root {
+  --radius: 0.5rem;
+  --background: oklch(0.975 0.007 165);
+  --app: oklch(0.955 0.012 165);
+  --surface: oklch(1 0 0);
+  --foreground: oklch(0.22 0.035 242);
+  --muted: oklch(0.93 0.012 165);
+  --muted-foreground: oklch(0.43 0.035 242);
+  --secondary: oklch(0.94 0.018 230);
+  --border: oklch(0.84 0.02 230);
+  --category: oklch(0.47 0.19 25);
+  --category-foreground: oklch(0.99 0 0);
+  --category-soft: oklch(0.94 0.035 25);
+  --emergency: oklch(0.48 0.2 25);
+  --emergency-foreground: oklch(0.99 0 0);
+  --warning: oklch(0.88 0.16 88);
+  --warning-foreground: oklch(0.23 0.035 75);
+  --success: oklch(0.43 0.12 155);
+  --success-soft: oklch(0.94 0.035 155);
+}
+
+[data-category="care"] {
+  --category: oklch(0.43 0.13 155);
+  --category-soft: oklch(0.94 0.035 155);
+}
+[data-category="vehicle"] {
+  --category: oklch(0.38 0.07 85);
+  --category-foreground: oklch(0.99 0 0);
+  --category-soft: oklch(0.92 0.12 88);
+}
+[data-category="communication"] {
+  --category: oklch(0.44 0.13 285);
+  --category-soft: oklch(0.94 0.035 285);
+}
+[data-category="medical"] {
+  --category: oklch(0.47 0.19 25);
+  --category-soft: oklch(0.94 0.035 25);
+}
+[data-category="elderly"] {
+  --category: oklch(0.43 0.13 155);
+  --category-soft: oklch(0.94 0.035 155);
+}
+[data-category="kids"] {
+  --category: oklch(0.47 0.13 240);
+  --category-soft: oklch(0.94 0.035 240);
+}
+[data-category="deaf-mute"] {
+  --category: oklch(0.44 0.13 285);
+  --category-soft: oklch(0.94 0.035 285);
+}
+[data-category="disability"] {
+  --category: oklch(0.5 0.14 210);
+  --category-soft: oklch(0.94 0.035 210);
+}
+[data-category="epilepsy-cardiac"] {
+  --category: oklch(0.47 0.19 25);
+  --category-soft: oklch(0.94 0.035 25);
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+  html {
+    font-size: 100%;
+    background: var(--background);
+  }
+  body {
+    margin: 0;
+    min-width: 320px;
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    letter-spacing: 0;
+  }
+  button,
+  a {
+    -webkit-tap-highlight-color: transparent;
+  }
+  ::selection {
+    background: var(--category-soft);
+    color: var(--category);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  section {
+    animation: surface-in 220ms ease-out;
+  }
+  @keyframes surface-in {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+  }
+}
