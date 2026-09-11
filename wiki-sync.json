@@ -1,0 +1,9 @@
+{
+  "project": "safetyspell",
+  "wikiRoot": "D:/project-wiki/10-systems/safetyspell",
+  "routes": [
+    {"paths": ["dist/index.html"], "pages": ["safetyspell-architecture", "safetyspell-status", "safetyspell-tests"]},
+    {"paths": [".openai/hosting.json"], "pages": ["safetyspell-architecture", "safetyspell-status"]},
+    {"paths": ["AGENTS.md", "WIKI_SYNC.md"], "pages": ["safetyspell-overview"]}
+  ]
+}
