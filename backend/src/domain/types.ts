@@ -1,0 +1,33 @@
+export type V1Visibility = "private" | "public";
+export type Provenance = "guardian_reported" | "clinician_verified";
+
+export interface ActiveTag {
+  id: string;
+  wardId: string;
+  category: string;
+}
+export interface PublicField {
+  key: string;
+  label: string;
+  value: unknown;
+  provenance: Provenance;
+  catalogVersion: number;
+}
+export interface PublicProjection {
+  category: string;
+  fields: PublicField[];
+  policyVersion: number;
+}
+export interface PublishedGuidance {
+  ruleId: string;
+  version: number;
+  do: string[];
+  dont: string[];
+}
+export interface PublicScanResponse {
+  status: "available" | "tag_unavailable";
+  category?: string;
+  fields?: Array<Pick<PublicField, "key" | "label" | "value" | "provenance">>;
+  guidance?: PublishedGuidance[];
+  disclaimer?: string;
+}
