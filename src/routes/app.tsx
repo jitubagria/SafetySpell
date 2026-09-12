@@ -6,6 +6,7 @@ import {
   Home,
   LoaderCircle,
   LogOut,
+  QrCode,
   ShieldCheck,
   UsersRound,
 } from "lucide-react";
@@ -13,11 +14,14 @@ import { FormEvent, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { DemoGate } from "@/components/demo-gate";
+import { WardTagQr } from "@/components/ward-tag-qr";
 import {
   type ApiGuardianField,
+  type ApiWardTag,
   coreApiUrl,
   CoreApiError,
   listFields,
+  listTags,
   listWards,
   login,
   setVisibility,
@@ -34,6 +38,17 @@ const valuesByKey = {
   primary_language: [
     ["hi", "Hindi"],
     ["en", "English"],
+  ],
+  blood_group: [
+    ["A+", "A+"],
+    ["A-", "A-"],
+    ["B+", "B+"],
+    ["B-", "B-"],
+    ["O+", "O+"],
+    ["O-", "O-"],
+    ["AB+", "AB+"],
+    ["AB-", "AB-"],
+    ["Unknown", "Unknown"],
   ],
 } as const;
 
@@ -74,6 +89,12 @@ function GuardianApp() {
   const fields = useQuery({
     queryKey: ["guardian-fields", token, selectedWard?.id],
     queryFn: () => listFields(token ?? "", selectedWard?.id ?? ""),
+    enabled: Boolean(token && selectedWard),
+    retry: false,
+  });
+  const tags = useQuery({
+    queryKey: ["guardian-tags", token, selectedWard?.id],
+    queryFn: () => listTags(token ?? "", selectedWard?.id ?? ""),
     enabled: Boolean(token && selectedWard),
     retry: false,
   });
@@ -148,7 +169,8 @@ function GuardianApp() {
           </p>
           <h1 className="mt-1 font-display text-3xl font-bold">Guardian access</h1>
           <p className="mt-2 text-base text-muted-foreground">
-            Local Core API mode. Only age band and primary language are available in this prototype.
+            Local Core API mode. Age band, primary language, blood group and allergies are available
+            in this prototype.
           </p>
         </header>
         {!token ? (
@@ -165,10 +187,14 @@ function GuardianApp() {
           <GuardianWorkspace
             wards={wards.data ?? []}
             selectedWardId={selectedWard?.id}
+            selectedWardLabel={selectedWard?.name ?? ""}
             onSelectWard={setSelectedWardId}
             fields={fields.data ?? []}
             fieldsPending={fields.isPending}
             fieldsError={fields.error}
+            tags={tags.data ?? []}
+            tagsPending={tags.isPending}
+            tagsError={tags.error}
             pendingFieldId={pendingFieldId}
             updateError={updateError}
             onUpdateField={updateField}
@@ -251,10 +277,14 @@ function LoginForm({
 function GuardianWorkspace({
   wards,
   selectedWardId,
+  selectedWardLabel,
   onSelectWard,
   fields,
   fieldsPending,
   fieldsError,
+  tags,
+  tagsPending,
+  tagsError,
   pendingFieldId,
   updateError,
   onUpdateField,
@@ -263,10 +293,14 @@ function GuardianWorkspace({
 }: {
   wards: Array<{ id: string; name: string; category: string }>;
   selectedWardId?: string;
+  selectedWardLabel: string;
   onSelectWard: (id: string) => void;
   fields: ApiGuardianField[];
   fieldsPending: boolean;
   fieldsError: Error | null;
+  tags: ApiWardTag[];
+  tagsPending: boolean;
+  tagsError: Error | null;
   pendingFieldId: string | null;
   updateError: string | null;
   onUpdateField: (field: ApiGuardianField, value: string) => Promise<void>;
@@ -313,8 +347,9 @@ function GuardianWorkspace({
             Minimal private profile and consent
           </CardTitle>
           <CardDescription>
-            Values are saved to the local API. Public release remains unavailable until a clinical
-            reviewer has approved the catalog field.
+            Values are saved privately to the local API. Nothing is public until you release a
+            field. Released fields appear on the public scan; free-text entries are stripped of
+            links and formatting on save.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -342,7 +377,59 @@ function GuardianWorkspace({
           </div>
         </CardContent>
       </Card>
+      <Card className="mt-7 border-category/30">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <QrCode className="text-category" />
+            Rescue ID tags
+          </CardTitle>
+          <CardDescription>
+            Generate a printable QR for a tag. It opens that tag&apos;s public scan page and encodes
+            no personal data. The backup code prints underneath for a scratched QR.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <WardTagQr
+            wardLabel={selectedWardLabel}
+            tags={tags}
+            pending={tagsPending}
+            error={tagsError}
+          />
+        </CardContent>
+      </Card>
     </>
+  );
+}
+
+function AllergyInput({
+  current,
+  pending,
+  onSave,
+}: {
+  current: string;
+  pending: boolean;
+  onSave: (value: string) => Promise<void>;
+}) {
+  const [draft, setDraft] = useState(current);
+  useEffect(() => {
+    setDraft(current);
+  }, [current]);
+  return (
+    <div className="grid gap-1">
+      <textarea
+        className="min-h-24 rounded-md border border-input bg-background px-3 py-2 font-normal"
+        value={draft}
+        disabled={pending}
+        placeholder={"One allergy per line\ne.g.\nPenicillin\nPeanuts"}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={() => {
+          if (draft !== current) void onSave(draft);
+        }}
+      />
+      <span className="text-xs font-normal text-muted-foreground">
+        One allergy per line. Links and formatting are stripped on save.
+      </span>
+    </div>
   );
 }
 
@@ -357,28 +444,39 @@ function FieldEditor({
   onUpdateField: (field: ApiGuardianField, value: string) => Promise<void>;
   onUpdateVisibility: (field: ApiGuardianField) => Promise<void>;
 }) {
-  const options = valuesByKey[field.key];
-  if (!options) return null;
+  const isFreeText = field.key === "allergy";
+  const options = (valuesByKey as Record<string, ReadonlyArray<readonly [string, string]>>)[
+    field.key
+  ];
+  if (!isFreeText && !options) return null;
   const current = typeof field.value === "string" ? field.value : "";
   return (
     <div className="rounded-lg border border-border p-4">
       <label className="grid gap-2 text-sm font-bold">
         {field.label}
-        <select
-          className="h-11 rounded-md border border-input bg-background px-3"
-          value={current}
-          disabled={pending}
-          onChange={(event) => {
-            void onUpdateField(field, event.target.value);
-          }}
-        >
-          <option value="">Choose {field.label.toLowerCase()}</option>
-          {options.map(([value, label]) => (
-            <option key={value} value={value}>
-              {label}
-            </option>
-          ))}
-        </select>
+        {isFreeText ? (
+          <AllergyInput
+            current={current}
+            pending={pending}
+            onSave={(value) => onUpdateField(field, value)}
+          />
+        ) : (
+          <select
+            className="h-11 rounded-md border border-input bg-background px-3"
+            value={current}
+            disabled={pending}
+            onChange={(event) => {
+              void onUpdateField(field, event.target.value);
+            }}
+          >
+            <option value="">Choose {field.label.toLowerCase()}</option>
+            {(options ?? []).map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+        )}
       </label>
       <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
         <p className="text-sm text-muted-foreground">
@@ -386,7 +484,7 @@ function FieldEditor({
             ? "Publicly released"
             : field.publicReleaseEligible
               ? "Private"
-              : "Private — catalog review pending"}
+              : "Private — not public-capable"}
         </p>
         <Button
           variant="outline"

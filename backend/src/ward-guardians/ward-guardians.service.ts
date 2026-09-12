@@ -1,6 +1,9 @@
 import { ForbiddenException, Inject, Injectable, NotFoundException } from "@nestjs/common";
 import { RESCUE_REPOSITORY, RescueRepository } from "../domain/rescue.repository";
-import { validateCatalogValue } from "../category-catalog/catalog-value-validation";
+import {
+  sanitizeCatalogValue,
+  validateCatalogValue,
+} from "../category-catalog/catalog-value-validation";
 
 @Injectable()
 export class WardGuardiansService {
@@ -16,6 +19,11 @@ export class WardGuardiansService {
   async fields(userId: string, wardId: string) {
     return this.repository.getAuthorizedFields(userId, wardId);
   }
+  async tags(userId: string, wardId: string) {
+    const ward = await this.repository.getAuthorizedWard(userId, wardId);
+    if (!ward) throw new NotFoundException("Ward not found");
+    return this.repository.listAuthorizedWardTags(userId, wardId);
+  }
   async writeGuardianValue(input: {
     userId: string;
     wardId: string;
@@ -27,20 +35,15 @@ export class WardGuardiansService {
     if (!ward) throw new ForbiddenException("No active guardian authorization");
     const field = await this.repository.getCatalogField(input.catalogId, ward.category);
     if (!field) throw new NotFoundException("Catalog field unavailable");
-    validateCatalogValue(field.dataType, field.validationPolicy, input.value);
+    // Free-text values pass the server-side safety lock (HTML stripped, links neutralised,
+    // plain text, length-capped) before validation and storage.
+    const value = sanitizeCatalogValue(field.dataType, field.validationPolicy, input.value);
+    validateCatalogValue(field.dataType, field.validationPolicy, value);
     await this.repository.upsertGuardianValue({
       wardId: input.wardId,
       catalogId: input.catalogId,
-      value: input.value,
+      value,
       actorId: input.userId,
     });
-  }
-  verifyClinicalValue(input: {
-    wardId: string;
-    catalogId: string;
-    verifierId: string;
-    verificationNote?: string;
-  }) {
-    return this.repository.verifyClinicalValue(input);
   }
 }

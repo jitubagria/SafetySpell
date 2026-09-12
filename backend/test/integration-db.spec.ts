@@ -26,8 +26,6 @@ type Seed = {
 type MinimalSeed = Seed & {
   ageBandFieldId: string;
   primaryLanguageFieldId: string;
-  reviewerId: string;
-  reviewerPassword: string;
 };
 let app: INestApplication;
 let db: Pool;
@@ -108,19 +106,10 @@ async function seedMinimalDraft(): Promise<MinimalSeed> {
   const tagCode = randomUUID().replaceAll("-", "");
   const ageBandFieldId = randomUUID();
   const primaryLanguageFieldId = randomUUID();
-  const reviewerId = randomUUID();
   const password = "integration-password";
-  const reviewerPassword = "reviewer-integration-password";
   await db.query(
-    "INSERT INTO users(id, name, email, password_hash, role) VALUES ($1, 'Guardian', $2, $3, 'guardian'), ($4, 'Reviewer', $5, $6, 'clinical_reviewer')",
-    [
-      guardianId,
-      `${guardianId}@example.test`,
-      await bcrypt.hash(password, 4),
-      reviewerId,
-      `${reviewerId}@example.test`,
-      await bcrypt.hash(reviewerPassword, 4),
-    ],
+    "INSERT INTO users(id, name, email, password_hash, role) VALUES ($1, 'Guardian', $2, $3, 'guardian')",
+    [guardianId, `${guardianId}@example.test`, await bcrypt.hash(password, 4)],
   );
   await db.query("INSERT INTO wards(id, category, name) VALUES ($1, 'medical', 'Minimal ward')", [
     wardId,
@@ -149,8 +138,6 @@ async function seedMinimalDraft(): Promise<MinimalSeed> {
     password,
     ageBandFieldId,
     primaryLanguageFieldId,
-    reviewerId,
-    reviewerPassword,
   };
 }
 
@@ -174,6 +161,9 @@ beforeAll(async () => {
     "002_p0_role_and_scan_log_hardening.sql",
     "003_p0_catalog_value_constraints.sql",
     "004_minimal_guardian_catalog.sql",
+    "005_allergy_public_free_text.sql",
+    "006_remove_clinical_reviewer.sql",
+    "007_blood_group_public_capable.sql",
   ]);
   const tables = await db.query(
     "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename",
@@ -361,7 +351,31 @@ describe("Rescue ID live PostgreSQL integration boundary", () => {
       .expect(403);
   });
 
-  it("keeps the minimal guardian fields private until reviewer approval, then releases only them", async () => {
+  it("returns a ward's active tag codes to its guardian and hides them from outsiders", async () => {
+    const data = await seed();
+    const token = await tokenFor(data);
+    const authorized = await request(app.getHttpServer())
+      .get(`/v1/app/wards/${data.wardId}/tags`)
+      .set("Authorization", `Bearer ${token}`)
+      .expect(200);
+    expect(authorized.body).toEqual([{ code: data.tagCode, form: "band" }]);
+
+    const outsiderId = randomUUID();
+    await db.query(
+      "INSERT INTO users(id, name, email, password_hash, role) VALUES ($1, 'Outsider', $2, $3, 'guardian')",
+      [outsiderId, `${outsiderId}@example.test`, await bcrypt.hash("outsider-password", 4)],
+    );
+    const outsiderToken = await tokenForCredentials(
+      `${outsiderId}@example.test`,
+      "outsider-password",
+    );
+    await request(app.getHttpServer())
+      .get(`/v1/app/wards/${data.wardId}/tags`)
+      .set("Authorization", `Bearer ${outsiderToken}`)
+      .expect(404);
+  });
+
+  it("keeps the minimal guardian fields private until the catalog is public-cleared, then releases only them", async () => {
     const data = await seedMinimalDraft();
     const guardianToken = await tokenFor(data);
     const initialFields = await request(app.getHttpServer())
@@ -394,21 +408,20 @@ describe("Rescue ID live PostgreSQL integration boundary", () => {
       .set("Authorization", `Bearer ${guardianToken}`)
       .send({ value: "hi" })
       .expect(200);
+    // Not public-capable yet: the guardian cannot release regardless of intent.
     await request(app.getHttpServer())
       .put(`/v1/app/wards/${data.wardId}/fields/${data.ageBandFieldId}/visibility`)
       .set("Authorization", `Bearer ${guardianToken}`)
       .send({ visibility: "public" })
       .expect(403);
 
-    const reviewerToken = await tokenForCredentials(
-      `${data.reviewerId}@example.test`,
-      data.reviewerPassword,
+    // Owner/policy clearance for public use (no clinical reviewer). approved_by/approved_at
+    // stay NULL together, as migration 006 permits for policy-approved fields.
+    await db.query(
+      "UPDATE field_catalog SET approved = true, public_eligible = true, max_level = 'public' WHERE id = ANY($1::uuid[])",
+      [[data.ageBandFieldId, data.primaryLanguageFieldId]],
     );
     for (const fieldId of [data.ageBandFieldId, data.primaryLanguageFieldId]) {
-      await request(app.getHttpServer())
-        .put(`/v1/staff/catalog/${fieldId}/clinical-approval/public`)
-        .set("Authorization", `Bearer ${reviewerToken}`)
-        .expect(200);
       await request(app.getHttpServer())
         .put(`/v1/app/wards/${data.wardId}/fields/${fieldId}/visibility`)
         .set("Authorization", `Bearer ${guardianToken}`)
@@ -427,6 +440,43 @@ describe("Rescue ID live PostgreSQL integration boundary", () => {
       ]),
     );
     expect(scan.body.fields).toHaveLength(2);
+  });
+
+  it("releases guardian-entered free-text allergy as a public field once the catalog is cleared", async () => {
+    const data = await seedMinimalDraft();
+    const guardianToken = await tokenFor(data);
+    const allergyFieldId = randomUUID();
+    // A public-capable free-text catalog field (the allergy capability), owner-cleared.
+    await db.query(
+      `INSERT INTO field_catalog(id, category, field_key, label, data_type, max_level, public_eligible, approved, guardian_editable, validation_policy)
+       VALUES ($1, 'medical', 'allergy', 'Allergy', 'text', 'public', true, true, true, '{"max_length":1000}'::jsonb)`,
+      [allergyFieldId],
+    );
+    // Guardian writes hostile free text; the server-side lock must strip it before storage.
+    await request(app.getHttpServer())
+      .patch(`/v1/app/wards/${data.wardId}/fields/${allergyFieldId}`)
+      .set("Authorization", `Bearer ${guardianToken}`)
+      .send({
+        value: 'Penicillin <b>x</b>\nvisit http://evil.test\n<a href="javascript:1">Peanuts</a>',
+      })
+      .expect(200);
+    await request(app.getHttpServer())
+      .put(`/v1/app/wards/${data.wardId}/fields/${allergyFieldId}/visibility`)
+      .set("Authorization", `Bearer ${guardianToken}`)
+      .send({ visibility: "public" })
+      .expect(200);
+    const scan = await request(app.getHttpServer())
+      .get(`/v1/public/scan/${data.tagCode}`)
+      .expect(200);
+    const allergy = scan.body.fields.find((field: { key: string }) => field.key === "allergy") as {
+      value: string;
+    };
+    expect(allergy).toBeDefined();
+    expect(allergy.value).not.toMatch(/<[^>]*>/);
+    expect(allergy.value).not.toMatch(/https?:\/\//i);
+    expect(allergy.value).not.toMatch(/javascript:/i);
+    expect(allergy.value).toContain("Penicillin");
+    expect(allergy.value).toContain("Peanuts");
   });
 
   it("returns one neutral scan response for inactive, lost, revoked, and unknown tags", async () => {
@@ -450,15 +500,24 @@ describe("Rescue ID live PostgreSQL integration boundary", () => {
       .expect({ status: "tag_unavailable" });
   });
 
-  it("rejects a public free-text catalog at the database layer", async () => {
-    const data = await seed();
+  it("accepts bounded public free text but rejects unbounded public free text at the database layer", async () => {
+    // Bounded public free text is now permitted (the allergy capability). approved_by/approved_at
+    // stay NULL together for an owner/policy-cleared field.
     await expect(
       db.query(
-        `INSERT INTO field_catalog(id, category, field_key, label, data_type, max_level, public_eligible, approved, approved_by, approved_at, validation_policy)
-         VALUES ($1, 'medical', 'unsafe_note', 'Unsafe note', 'short_text', 'public', true, true, $2, now(), '{"max_length":64}'::jsonb)`,
-        [randomUUID(), data.guardianId],
+        `INSERT INTO field_catalog(id, category, field_key, label, data_type, max_level, public_eligible, approved, validation_policy)
+         VALUES ($1, 'medical', 'note_bounded', 'Bounded note', 'short_text', 'public', true, true, '{"max_length":64}'::jsonb)`,
+        [randomUUID()],
       ),
-    ).rejects.toThrow(/field_catalog_public_controlled_values/);
+    ).resolves.toBeDefined();
+    // Public free text must carry a finite, in-range length bound: an over-large cap is rejected.
+    await expect(
+      db.query(
+        `INSERT INTO field_catalog(id, category, field_key, label, data_type, max_level, public_eligible, approved, validation_policy)
+         VALUES ($1, 'medical', 'note_oversized', 'Oversized note', 'short_text', 'public', true, true, '{"max_length":5000}'::jsonb)`,
+        [randomUUID()],
+      ),
+    ).rejects.toThrow(/field_catalog_text_bound/);
   });
 
   it("records a keyed IP pseudonym but never raw scan data in PostgreSQL", async () => {
@@ -472,15 +531,6 @@ describe("Rescue ID live PostgreSQL integration boundary", () => {
     expect(result.rows[0].shown_field_keys).toEqual([]);
     expect(result.rows[0].scanner_ip_hmac).toMatch(/^[a-f0-9]{64}$/);
     expect(JSON.stringify(result.rows[0])).not.toContain("127.0.0.1");
-  });
-
-  it("rejects a guardian token at the clinical-reviewer HTTP boundary", async () => {
-    const data = await seed();
-    const token = await tokenFor(data);
-    await request(app.getHttpServer())
-      .put(`/v1/staff/catalog/${data.fieldId}/clinical-approval/public`)
-      .set("Authorization", `Bearer ${token}`)
-      .expect(403);
   });
 
   it("rejects a staff token at the guardian HTTP boundary", async () => {

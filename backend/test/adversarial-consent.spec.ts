@@ -4,15 +4,9 @@ import { Reflector } from "@nestjs/core";
 import { RolesGuard } from "../src/common/request-user";
 import { ConsentPrivacyService } from "../src/consent-privacy/consent-privacy.service";
 import { RescueRepository } from "../src/domain/rescue.repository";
-import { CategoryCatalogController } from "../src/category-catalog/category-catalog.controller";
-import { CategoryCatalogService } from "../src/category-catalog/category-catalog.service";
-import { GuidanceController } from "../src/guidance/guidance.controller";
 import { ScanLogIpHasher, hmacScanIp } from "../src/scan-resolver/scan-log-ip-hasher";
 import { ScanResolverService } from "../src/scan-resolver/scan-resolver.service";
-import {
-  StaffVerificationController,
-  WardGuardiansController,
-} from "../src/ward-guardians/ward-guardians.controller";
+import { WardGuardiansController } from "../src/ward-guardians/ward-guardians.controller";
 import { WardGuardiansService } from "../src/ward-guardians/ward-guardians.service";
 
 const baseRepository = (): jest.Mocked<RescueRepository> => ({
@@ -22,13 +16,13 @@ const baseRepository = (): jest.Mocked<RescueRepository> => ({
   writeScanLog: jest.fn(),
   listAuthorizedWards: jest.fn(),
   getAuthorizedWard: jest.fn(),
+  listAuthorizedWardTags: jest.fn(),
   getAuthorizedFields: jest.fn(),
   assertGuardianPermission: jest.fn(),
   getCatalogField: jest.fn(),
   upsertGuardianValue: jest.fn(),
   setVisibility: jest.fn(),
   withdrawPublicRelease: jest.fn(),
-  verifyClinicalValue: jest.fn(),
   getLatestPrivacyNotice: jest.fn(),
   getConsentAudit: jest.fn(),
   transaction: jest.fn(),
@@ -38,7 +32,7 @@ const hashIp = (secret = "test-hmac-secret") =>
   ({ hash: (ip?: string) => hmacScanIp(ip, secret) }) as ScanLogIpHasher;
 
 const roleContext = (
-  role: "company_admin" | "guardian" | "staff" | "clinical_reviewer",
+  role: "company_admin" | "guardian" | "staff",
   controller: object,
   handler: object,
 ): ExecutionContext =>
@@ -172,27 +166,6 @@ describe("Rescue ID V1 adversarial consent boundary", () => {
     expect("resolveActionHandle" in repo).toBe(false);
   });
 
-  it("enforces class-level roles: guardian/staff contexts cannot enter clinical reviewer routes", () => {
-    const guard = new RolesGuard(new Reflector());
-    const reviewerRoutes: Array<[object, object]> = [
-      [CategoryCatalogController, CategoryCatalogController.prototype.approve],
-      [GuidanceController, GuidanceController.prototype.publish],
-      [StaffVerificationController, StaffVerificationController.prototype.verify],
-    ];
-    for (const [controller, handler] of reviewerRoutes) {
-      expect(() => guard.canActivate(roleContext("guardian", controller, handler))).toThrow(
-        ForbiddenException,
-      );
-      expect(() => guard.canActivate(roleContext("staff", controller, handler))).toThrow(
-        ForbiddenException,
-      );
-      expect(() => guard.canActivate(roleContext("company_admin", controller, handler))).toThrow(
-        ForbiddenException,
-      );
-      expect(guard.canActivate(roleContext("clinical_reviewer", controller, handler))).toBe(true);
-    }
-  });
-
   it("blocks staff from guardian routes even though those roles live on the controller class", () => {
     const guard = new RolesGuard(new Reflector());
     expect(() =>
@@ -216,7 +189,7 @@ describe("Rescue ID V1 adversarial consent boundary", () => {
     expect(hmacScanIp("203.0.113.7", undefined)).toBeUndefined();
   });
 
-  it("rejects an address-like free-text value routed through a controlled public field", async () => {
+  it("rejects an out-of-policy value routed through a controlled public enum field", async () => {
     const repo = baseRepository();
     repo.getAuthorizedWard.mockResolvedValue({
       id: "ward-1",
@@ -246,7 +219,7 @@ describe("Rescue ID V1 adversarial consent boundary", () => {
     expect(repo.upsertGuardianValue).not.toHaveBeenCalled();
   });
 
-  it("refuses public release for a free-text catalog even if unsafe database state claims it is approved", async () => {
+  it("refuses public release for a free-text field with no length bound", async () => {
     const repo = baseRepository();
     repo.getAuthorizedWard.mockResolvedValue({
       id: "ward-1",
@@ -254,15 +227,17 @@ describe("Rescue ID V1 adversarial consent boundary", () => {
       name: "Private",
       status: "active",
     });
+    // Public free text is admissible ONLY when bounded. Without a numeric max_length the
+    // consent gate must still refuse release even if the row otherwise claims it is public.
     repo.getCatalogField.mockResolvedValue({
       id: "catalog-1",
       category: "medical",
-      key: "blood_group",
+      key: "allergy",
       approved: true,
       publicEligible: true,
       maxLevel: "public",
-      dataType: "short_text",
-      validationPolicy: { max_length: 32 },
+      dataType: "text",
+      validationPolicy: {},
     });
     await expect(
       new ConsentPrivacyService(repo).setVisibility({
@@ -276,15 +251,38 @@ describe("Rescue ID V1 adversarial consent boundary", () => {
     expect(repo.setVisibility).not.toHaveBeenCalled();
   });
 
-  it("rejects an unconstrained catalog approval attempt for public release", async () => {
-    const db = { query: jest.fn().mockResolvedValue({ rowCount: 0 }) };
-    const service = new CategoryCatalogService(db as never);
-    await expect(service.approveForPublicRelease("catalog-1", "reviewer-1")).rejects.toThrow(
-      "Only a catalog field with explicit controlled allowed values",
-    );
-    expect(db.query).toHaveBeenCalledWith(
-      expect.stringContaining("data_type IN ('enum', 'boolean')"),
-      ["catalog-1", "reviewer-1"],
-    );
+  it("sanitises hostile free-text before storage: strips HTML and neutralises links", async () => {
+    const repo = baseRepository();
+    repo.getAuthorizedWard.mockResolvedValue({
+      id: "ward-1",
+      category: "medical",
+      name: "Private",
+      status: "active",
+    });
+    repo.getCatalogField.mockResolvedValue({
+      id: "catalog-1",
+      category: "medical",
+      key: "allergy",
+      approved: true,
+      publicEligible: true,
+      maxLevel: "public",
+      dataType: "text",
+      validationPolicy: { max_length: 1000 },
+    });
+    const service = new WardGuardiansService(repo);
+    await service.writeGuardianValue({
+      userId: "guardian-1",
+      wardId: "ward-1",
+      catalogId: "catalog-1",
+      value:
+        'Penicillin <script>alert(1)</script>\nvisit http://evil.test and www.bad.test\n<a href="javascript:steal()">Peanuts</a>',
+    });
+    const stored = repo.upsertGuardianValue.mock.calls[0]![0].value as string;
+    expect(typeof stored).toBe("string");
+    expect(stored).not.toMatch(/<[^>]*>/); // no HTML tags
+    expect(stored).not.toMatch(/https?:\/\//i); // no clickable url scheme
+    expect(stored).not.toMatch(/javascript:/i); // no script scheme
+    expect(stored).toContain("Penicillin");
+    expect(stored).toContain("Peanuts");
   });
 });

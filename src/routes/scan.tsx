@@ -58,11 +58,11 @@ function PublicScan() {
           </p>
         </header>
         <section className="border-y-2 border-category py-7" aria-labelledby="scan-result-title">
-          <div className="flex items-start gap-4">
+          <div className="flex flex-col items-center text-center">
             <div className="grid size-20 shrink-0 place-items-center rounded-full bg-category-soft text-category">
               <ShieldAlert className="size-10" />
             </div>
-            <div>
+            <div className="mt-4">
               <p className="text-sm font-bold uppercase text-category">Public scan result</p>
               <h2 id="scan-result-title" className="font-display text-3xl font-bold">
                 {!tag
@@ -138,14 +138,36 @@ function ScanResult({
       </p>
     );
   return (
-    <dl className="mt-4 grid gap-3">
-      {result.fields.map((field) => (
-        <div key={field.key} className="rounded-lg bg-category-soft px-4 py-3">
-          <dt className="text-sm font-bold text-category">{field.label}</dt>
-          <dd className="mt-1 text-lg font-semibold">{displayValue(field.key, field.value)}</dd>
-          <p className="mt-1 text-xs text-muted-foreground">Family-provided information</p>
-        </div>
-      ))}
-    </dl>
+    <div className="mt-4">
+      <dl className="mx-auto grid max-w-md gap-3">
+        {result.fields.map((field) => {
+          const allergyLines =
+            field.key === "allergy" && typeof field.value === "string"
+              ? field.value.split("\n").filter((line) => line.trim().length > 0)
+              : null;
+          return (
+            <div key={field.key} className="rounded-lg bg-category-soft px-4 py-3 text-center">
+              <dt className="text-sm font-bold text-category">{field.label}</dt>
+              {allergyLines ? (
+                <dd className="mt-1 flex justify-center">
+                  <ul className="inline-block list-disc space-y-0.5 pl-5 text-left text-lg font-semibold">
+                    {allergyLines.map((line, index) => (
+                      <li key={index}>{line}</li>
+                    ))}
+                  </ul>
+                </dd>
+              ) : (
+                <dd className="mt-1 text-lg font-semibold">
+                  {displayValue(field.key, field.value)}
+                </dd>
+              )}
+            </div>
+          );
+        })}
+      </dl>
+      <p className="mx-auto mt-3 max-w-md text-center text-xs text-muted-foreground">
+        All information is family-provided and may be incomplete.
+      </p>
+    </div>
   );
 }

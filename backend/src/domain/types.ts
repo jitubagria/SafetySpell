@@ -1,5 +1,5 @@
 export type V1Visibility = "private" | "public";
-export type Provenance = "guardian_reported" | "clinician_verified";
+export type Provenance = "guardian_reported";
 
 export interface ActiveTag {
   id: string;

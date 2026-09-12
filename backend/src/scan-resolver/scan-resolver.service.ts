@@ -35,8 +35,7 @@ export class ScanResolverService {
         provenance,
       })),
       guidance,
-      disclaimer:
-        "Information is family-provided unless explicitly identified as clinician-verified. This is not medical advice.",
+      disclaimer: "Information is family-provided. This is not medical advice.",
     };
   }
 }

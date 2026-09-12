@@ -2,7 +2,13 @@ import { ForbiddenException, Injectable, NotFoundException } from "@nestjs/commo
 import { PoolClient } from "pg";
 import { DatabaseService } from "../database/database.service";
 import { ActiveTag, PublicProjection, PublishedGuidance, Provenance, V1Visibility } from "./types";
-import { CatalogField, GuardianField, GuardianWard, RescueRepository } from "./rescue.repository";
+import {
+  CatalogField,
+  GuardianField,
+  GuardianWard,
+  RescueRepository,
+  WardTag,
+} from "./rescue.repository";
 
 type Row = Record<string, unknown>;
 const asString = (row: Row, key: string): string => String(row[key]);
@@ -126,6 +132,22 @@ export class PostgresRescueRepository implements RescueRepository {
       : null;
   }
 
+  async listAuthorizedWardTags(userId: string, wardId: string): Promise<WardTag[]> {
+    // Authorisation is enforced in the join: only a guardian's own active tags surface,
+    // and only the opaque code + form are returned — never ward data.
+    const result = await this.db.query<Row>(
+      `SELECT t.code, t.form FROM tags t
+       JOIN ward_guardians g ON g.ward_id = t.ward_id AND g.user_id = $1 AND g.active = true
+       WHERE t.ward_id = $2 AND t.status = 'active'
+       ORDER BY t.created_at`,
+      [userId, wardId],
+    );
+    return result.rows.map((row) => ({
+      code: asString(row, "code"),
+      form: asString(row, "form"),
+    }));
+  }
+
   async getAuthorizedFields(userId: string, wardId: string): Promise<GuardianField[]> {
     const allowed = await this.getAuthorizedWard(userId, wardId);
     if (!allowed) throw new ForbiddenException("No active guardian authorization");
@@ -133,9 +155,14 @@ export class PostgresRescueRepository implements RescueRepository {
       `SELECT f.id AS catalog_id, f.field_key, f.label, value.value, value.provenance,
               COALESCE(visibility.visibility, 'private') AS visibility,
               (f.approved = true AND f.public_eligible = true AND f.max_level = 'public'
-               AND f.data_type IN ('enum', 'boolean')
-               AND jsonb_typeof(f.validation_policy->'allowed_values') = 'array'
-               AND jsonb_array_length(f.validation_policy->'allowed_values') > 0) AS public_release_eligible
+               AND (
+                 (f.data_type IN ('enum', 'boolean')
+                  AND jsonb_typeof(f.validation_policy->'allowed_values') = 'array'
+                  AND jsonb_array_length(f.validation_policy->'allowed_values') > 0)
+                 OR
+                 (f.data_type IN ('text', 'short_text')
+                  AND jsonb_typeof(f.validation_policy->'max_length') = 'number')
+               )) AS public_release_eligible
        FROM wards w
        JOIN field_catalog f ON f.category = w.category AND f.guardian_editable = true
        LEFT JOIN ward_field_values value ON value.ward_id = w.id AND value.field_catalog_id = f.id
@@ -200,7 +227,7 @@ export class PostgresRescueRepository implements RescueRepository {
     await this.db.query(
       `INSERT INTO ward_field_values(ward_id, field_catalog_id, value, provenance, updated_by)
        VALUES ($1, $2, $3::jsonb, 'guardian_reported', $4)
-       ON CONFLICT (ward_id, field_catalog_id) DO UPDATE SET value = EXCLUDED.value, provenance = 'guardian_reported', verified_by = NULL, verified_at = NULL, verification_note = NULL, updated_by = EXCLUDED.updated_by, updated_at = now()`,
+       ON CONFLICT (ward_id, field_catalog_id) DO UPDATE SET value = EXCLUDED.value, provenance = 'guardian_reported', updated_by = EXCLUDED.updated_by, updated_at = now()`,
       [input.wardId, input.catalogId, JSON.stringify(input.value), input.actorId],
     );
   }
@@ -294,20 +321,6 @@ export class PostgresRescueRepository implements RescueRepository {
         : undefined,
       createdAt: asString(row, "created_at"),
     }));
-  }
-
-  async verifyClinicalValue(input: {
-    wardId: string;
-    catalogId: string;
-    verifierId: string;
-    verificationNote?: string;
-  }): Promise<void> {
-    const result = await this.db.query(
-      `UPDATE ward_field_values SET provenance = 'clinician_verified', verified_by = $3, verified_at = now(), verification_note = $4, updated_by = $3, updated_at = now()
-       WHERE ward_id = $1 AND field_catalog_id = $2`,
-      [input.wardId, input.catalogId, input.verifierId, input.verificationNote],
-    );
-    if (!result.rowCount) throw new NotFoundException("Field value not found");
   }
 
   async getLatestPrivacyNotice(): Promise<{

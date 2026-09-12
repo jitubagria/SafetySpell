@@ -8,7 +8,7 @@ import {
   Put,
   UseGuards,
 } from "@nestjs/common";
-import { IsDefined, IsIn, IsOptional, IsString, IsUUID, MaxLength } from "class-validator";
+import { IsDefined, IsIn } from "class-validator";
 import { ConsentPrivacyService } from "../consent-privacy/consent-privacy.service";
 import {
   CurrentUser,
@@ -24,9 +24,6 @@ class WriteFieldDto {
 }
 class SetVisibilityDto {
   @IsIn(["private", "public"]) visibility!: "private" | "public";
-}
-class VerifyClinicalDto {
-  @IsOptional() @IsString() @MaxLength(1000) verificationNote?: string;
 }
 class IsUuidPipe {
   transform(value: string): string {
@@ -63,6 +60,11 @@ export class WardGuardiansController {
     return this.wards.fields(user.id, wardId);
   }
 
+  @Get(":wardId/tags")
+  tags(@CurrentUser() user: AuthenticatedUser, @Param("wardId", new IsUuidPipe()) wardId: string) {
+    return this.wards.tags(user.id, wardId);
+  }
+
   @Patch(":wardId/fields/:catalogId")
   async write(
     @CurrentUser() user: AuthenticatedUser,
@@ -89,27 +91,5 @@ export class WardGuardiansController {
       sessionMetadata: { source: "guardian_api" },
     });
     return { status: "updated", visibility: body.visibility };
-  }
-}
-
-@Controller("v1/staff/wards")
-@UseGuards(JwtAuthGuard, RolesGuard)
-@Roles("clinical_reviewer")
-export class StaffVerificationController {
-  constructor(private readonly wards: WardGuardiansService) {}
-  @Patch(":wardId/fields/:catalogId/clinical-verification")
-  async verify(
-    @CurrentUser() user: AuthenticatedUser,
-    @Param("wardId", new IsUuidPipe()) wardId: string,
-    @Param("catalogId", new IsUuidPipe()) catalogId: string,
-    @Body() body: VerifyClinicalDto,
-  ) {
-    await this.wards.verifyClinicalValue({
-      wardId,
-      catalogId,
-      verifierId: user.id,
-      verificationNote: body.verificationNote,
-    });
-    return { status: "verified", provenance: "clinician_verified" };
   }
 }

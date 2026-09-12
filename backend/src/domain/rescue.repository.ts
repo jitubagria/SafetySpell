@@ -28,6 +28,11 @@ export interface CatalogField {
   dataType: string;
   validationPolicy: unknown;
 }
+export interface WardTag {
+  /** The existing opaque, high-entropy scan code. Not personal data. */
+  code: string;
+  form: string;
+}
 
 export interface RescueRepository {
   findActiveTag(code: string): Promise<ActiveTag | null>;
@@ -42,6 +47,8 @@ export interface RescueRepository {
   }): Promise<void>;
   listAuthorizedWards(userId: string): Promise<GuardianWard[]>;
   getAuthorizedWard(userId: string, wardId: string): Promise<GuardianWard | null>;
+  /** Active scan tags for a ward the guardian is authorised for. Codes only, no ward data. */
+  listAuthorizedWardTags(userId: string, wardId: string): Promise<WardTag[]>;
   getAuthorizedFields(userId: string, wardId: string): Promise<GuardianField[]>;
   assertGuardianPermission(
     userId: string,
@@ -79,12 +86,6 @@ export interface RescueRepository {
       createdAt: string;
     }>
   >;
-  verifyClinicalValue(input: {
-    wardId: string;
-    catalogId: string;
-    verifierId: string;
-    verificationNote?: string;
-  }): Promise<void>;
   getLatestPrivacyNotice(): Promise<{
     version: string;
     bodyMarkdown: string;

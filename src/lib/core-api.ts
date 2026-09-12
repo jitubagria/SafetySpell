@@ -7,14 +7,21 @@ export interface ApiWard {
   status: string;
 }
 
+export type ApiFieldKey = "age_band" | "primary_language" | "blood_group" | "allergy";
+
 export interface ApiGuardianField {
   catalogId: string;
-  key: "age_band" | "primary_language";
+  key: ApiFieldKey;
   label: string;
   value: unknown | null;
-  provenance: "guardian_reported" | "clinician_verified";
+  provenance: "guardian_reported";
   visibility: ApiVisibility;
   publicReleaseEligible: boolean;
+}
+
+export interface ApiWardTag {
+  code: string;
+  form: string;
 }
 
 export interface ApiScanResponse {
@@ -24,7 +31,7 @@ export interface ApiScanResponse {
     key: string;
     label: string;
     value: unknown;
-    provenance: "guardian_reported" | "clinician_verified";
+    provenance: "guardian_reported";
   }>;
   disclaimer?: string;
 }
@@ -32,6 +39,18 @@ export interface ApiScanResponse {
 const configuredUrl = import.meta.env.VITE_CORE_API_URL?.replace(/\/$/, "");
 export const coreApiUrl =
   configuredUrl ?? (import.meta.env.DEV ? "http://localhost:3001" : undefined);
+
+// Base of the public, login-free scan web. Dev defaults to the local frontend origin;
+// production must set VITE_PUBLIC_SCAN_BASE_URL to the real domain.
+const configuredScanBase = import.meta.env.VITE_PUBLIC_SCAN_BASE_URL?.replace(/\/$/, "");
+export const publicScanBaseUrl =
+  configuredScanBase ?? (import.meta.env.DEV ? "http://localhost:8080" : undefined);
+
+/** The public scan URL a QR encodes for an existing opaque tag code. */
+export function scanUrlForTag(tagCode: string, base = publicScanBaseUrl): string | undefined {
+  if (!base) return undefined;
+  return `${base}/scan?tag=${encodeURIComponent(tagCode)}`;
+}
 
 export class CoreApiError extends Error {
   constructor(
@@ -82,6 +101,10 @@ export function listWards(token: string): Promise<ApiWard[]> {
 
 export function listFields(token: string, wardId: string): Promise<ApiGuardianField[]> {
   return call<ApiGuardianField[]>(`/v1/app/wards/${wardId}/fields`, {}, token);
+}
+
+export function listTags(token: string, wardId: string): Promise<ApiWardTag[]> {
+  return call<ApiWardTag[]>(`/v1/app/wards/${wardId}/tags`, {}, token);
 }
 
 export function writeField(

@@ -3,10 +3,8 @@ import { ConfigModule } from "@nestjs/config";
 import { APP_GUARD } from "@nestjs/core";
 import { ThrottlerGuard, ThrottlerModule } from "@nestjs/throttler";
 import { AccountsModule } from "./accounts/accounts.module";
-import { CategoryCatalogModule } from "./category-catalog/category-catalog.module";
 import { ConsentPrivacyModule } from "./consent-privacy/consent-privacy.module";
 import { DatabaseModule } from "./database/database.module";
-import { GuidanceModule } from "./guidance/guidance.module";
 import { PrivacyNoticeModule } from "./privacy-notice/privacy-notice.module";
 import { ProfileModule } from "./profile/profile.module";
 import { ScanAuditModule } from "./scan-audit/scan-audit.module";
@@ -18,6 +16,9 @@ import { WardGuardiansModule } from "./ward-guardians/ward-guardians.module";
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
+      // In tests the database URL is supplied via the environment (an isolated test DB).
+      // Ignore any local .env so a developer's server .env cannot hijack the test database.
+      ignoreEnvFile: process.env.NODE_ENV === "test",
       validate: (config) => {
         if (config.NODE_ENV === "production" && !config.SCAN_LOG_IP_HMAC_SECRET) {
           throw new Error("SCAN_LOG_IP_HMAC_SECRET is required in production");
@@ -29,12 +30,10 @@ import { WardGuardiansModule } from "./ward-guardians/ward-guardians.module";
     DatabaseModule,
     AccountsModule,
     WardGuardiansModule,
-    CategoryCatalogModule,
     ProfileModule,
     ConsentPrivacyModule,
     TagLifecycleModule,
     ScanResolverModule,
-    GuidanceModule,
     ScanAuditModule,
     PrivacyNoticeModule,
   ],

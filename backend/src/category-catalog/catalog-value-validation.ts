@@ -21,8 +21,48 @@ function allowedValues(policy: unknown): unknown[] | undefined {
   return policy.allowed_values;
 }
 
+function boundedTextMaxLength(policy: unknown): number | undefined {
+  const max = isPolicy(policy) ? policy.max_length : undefined;
+  if (typeof max !== "number" || !Number.isInteger(max) || max < 1 || max > 1000) return undefined;
+  return max;
+}
+
 export function hasControlledPublicPolicy(dataType: string, policy: unknown): boolean {
-  return (dataType === "enum" || dataType === "boolean") && Boolean(allowedValues(policy));
+  if (dataType === "enum" || dataType === "boolean") return Boolean(allowedValues(policy));
+  // Public free text is admissible only when the catalog gives it a finite length bound.
+  if (dataType === "text" || dataType === "short_text")
+    return boundedTextMaxLength(policy) !== undefined;
+  return false;
+}
+
+// Server-side safety lock for free-text values (the one control kept for public free text):
+// strip HTML, neutralise clickable link schemes, force plain text, enforce the length cap.
+// Line breaks are preserved so callers can keep one entry per line.
+export function sanitizeFreeText(value: unknown, maxLength: number): string {
+  const raw = typeof value === "string" ? value : String(value ?? "");
+  // Strip control characters (keep tab and newline) without a control-char regex.
+  const noControl = Array.from(raw)
+    .filter((ch) => {
+      const code = ch.charCodeAt(0);
+      return code === 9 || code === 10 || (code >= 32 && code !== 127);
+    })
+    .join("");
+  const noTags = noControl.replace(/<[^>]*>/g, " ");
+  const noLinks = noTags
+    .replace(/(?:https?|ftp|file|data|javascript|vbscript|mailto|tel):\/*/gi, "")
+    .replace(/\bwww\.[^\s]*/gi, "[link removed]");
+  const lines = noLinks
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/[ \t]+/g, " ").trim())
+    .filter((line) => line.length > 0);
+  return lines.join("\n").slice(0, maxLength);
+}
+
+// Returns the value to persist: unchanged for controlled types, sanitised for free text.
+export function sanitizeCatalogValue(dataType: string, policy: unknown, value: unknown): unknown {
+  if (dataType !== "text" && dataType !== "short_text") return value;
+  return sanitizeFreeText(value, boundedTextMaxLength(policy) ?? 1000);
 }
 
 export function validateCatalogValue(dataType: string, policy: unknown, value: unknown): void {
