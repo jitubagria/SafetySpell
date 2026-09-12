@@ -9,7 +9,7 @@ import {
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { Reflector } from "@nestjs/core";
-import jwt from "jsonwebtoken";
+import * as jwt from "jsonwebtoken";
 
 export type ApiRole = "company_admin" | "guardian" | "staff" | "clinical_reviewer";
 export interface AuthenticatedUser {

@@ -22,6 +22,29 @@ This is an independent NestJS + PostgreSQL service. It is not connected to the R
 5. Run: `npm start` (or `npm run start:dev`). API routes begin with `/v1`.
 6. Run adversarial tests: `npm test`.
 
+## PostgreSQL-backed integration test setup
+
+Use an isolated database only. The following PowerShell setup was verified against a local PostgreSQL 16 service; it does not modify any existing application database.
+
+```powershell
+$pgBin = 'C:\Program Files\PostgreSQL\16\bin'
+& "$pgBin\createdb.exe" -h 127.0.0.1 -U postgres safetyspell_integration
+$env:DATABASE_URL = 'postgres://postgres@127.0.0.1:5432/safetyspell_integration'
+$env:INTEGRATION_DATABASE_URL = $env:DATABASE_URL
+$env:AUTH_JWT_SECRET = 'replace-with-a-test-only-secret-of-32-or-more-characters'
+$env:SCAN_LOG_IP_HMAC_SECRET = 'replace-with-a-different-test-only-secret-of-32-or-more-characters'
+npm run build
+npm run db:migrate
+npm run test:integration
+npm test
+```
+
+`test:integration` truncates only tables inside `safetyspell_integration` between tests. It proves migration-created constraints/triggers, public projection gates, transactional withdrawal, real HTTP/JWT authorisation, and scan throttling. Do not point it at a shared or production database. When finished, remove only this known disposable database if desired:
+
+```powershell
+& "$pgBin\dropdb.exe" -h 127.0.0.1 -U postgres safetyspell_integration
+```
+
 The public scan endpoint is rate-limited (30 requests/IP/minute). Scan logs use a separate keyed HMAC secret for optional IP pseudonymisation; they never retain raw IPs. If that secret is absent, the IP-derived log field is omitted rather than falling back to a reversible hash or raw IP.
 
 ## Important endpoint groups

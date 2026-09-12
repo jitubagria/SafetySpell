@@ -10,6 +10,7 @@
     "start:dev": "node ./node_modules/@nestjs/cli/bin/nest.js start --watch",
     "db:migrate": "node dist/database/migrate.js",
     "test": "node ./node_modules/jest/bin/jest.js --runInBand",
+    "test:integration": "node ./node_modules/jest/bin/jest.js --runInBand --testRegex integration-db\\.spec\\.ts$",
     "test:watch": "node ./node_modules/jest/bin/jest.js --watch",
     "lint": "node ./node_modules/eslint/bin/eslint.js \"{src,test}/**/*.ts\"",
     "format": "node ./node_modules/prettier/bin/prettier.cjs --write \"{src,test}/**/*.ts\""
@@ -38,6 +39,7 @@
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^24.3.0",
     "@types/pg": "^8.23.1",
+    "@types/supertest": "^7.2.1",
     "eslint": "^9.35.0",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-prettier": "^5.5.4",
