@@ -1,6 +1,6 @@
 # SafetySpell Core API — Rescue ID V1
 
-This is an independent NestJS + PostgreSQL service. It is not connected to the React/PWA prototype. The service implements the public-only consent boundary recorded in `D:\project-wiki\10-systems\safetyspell\decisions\adr-0001-public-only-rescue-id-consent-boundary.md`.
+This is an independent NestJS + PostgreSQL service. It can serve the demo-gated React/PWA locally through an explicitly configured browser origin; it is not deployed or connected to a production frontend. The service implements the public-only consent boundary recorded in `D:\project-wiki\10-systems\safetyspell\decisions\adr-0001-public-only-rescue-id-consent-boundary.md`.
 
 ## Safety boundary
 
@@ -21,6 +21,16 @@ This is an independent NestJS + PostgreSQL service. It is not connected to the R
 4. Apply schema: `npm run db:migrate`.
 5. Run: `npm start` (or `npm run start:dev`). API routes begin with `/v1`.
 6. Run adversarial tests: `npm test`.
+
+## Local frontend bridge (prototype only)
+
+The React frontend can use the real local API for only two draft catalog fields: `age_band` and `primary_language`. The migration seeds both fields as private drafts for every Rescue ID category. A logged-in `clinical_reviewer` must approve a catalog row through the existing reviewer route before a guardian can release it publicly; the migration never auto-approves it.
+
+1. In `backend/.env`, set `FRONTEND_ORIGIN=http://localhost:5173` (or an explicit comma-separated local origin list).
+2. In the repository root, copy `.env.example` to `.env.local`; keep `VITE_CORE_API_URL=http://localhost:3001` for local development.
+3. Start this API with `npm run start:dev` from `backend/`, then start the frontend from the repository root with `npm run dev`.
+
+Browser CORS is restricted to `FRONTEND_ORIGIN`; it does not use a wildcard. The frontend keeps its visible `DEMO / PROTOTYPE — not for real emergencies` gate and does not expose calls, messages, alerts, location, NFC, photos, names, clinical fields, or action handles.
 
 ## PostgreSQL-backed integration test setup
 

@@ -130,10 +130,18 @@ export class PostgresRescueRepository implements RescueRepository {
     const allowed = await this.getAuthorizedWard(userId, wardId);
     if (!allowed) throw new ForbiddenException("No active guardian authorization");
     const result = await this.db.query<Row>(
-      `SELECT f.id AS catalog_id, f.field_key, f.label, value.value, value.provenance, COALESCE(visibility.visibility, 'private') AS visibility
-       FROM ward_field_values value JOIN field_catalog f ON f.id = value.field_catalog_id
-       LEFT JOIN ward_field_visibility visibility ON visibility.ward_id = value.ward_id AND visibility.field_catalog_id = value.field_catalog_id
-       WHERE value.ward_id = $1`,
+      `SELECT f.id AS catalog_id, f.field_key, f.label, value.value, value.provenance,
+              COALESCE(visibility.visibility, 'private') AS visibility,
+              (f.approved = true AND f.public_eligible = true AND f.max_level = 'public'
+               AND f.data_type IN ('enum', 'boolean')
+               AND jsonb_typeof(f.validation_policy->'allowed_values') = 'array'
+               AND jsonb_array_length(f.validation_policy->'allowed_values') > 0) AS public_release_eligible
+       FROM wards w
+       JOIN field_catalog f ON f.category = w.category AND f.guardian_editable = true
+       LEFT JOIN ward_field_values value ON value.ward_id = w.id AND value.field_catalog_id = f.id
+       LEFT JOIN ward_field_visibility visibility ON visibility.ward_id = w.id AND visibility.field_catalog_id = f.id
+       WHERE w.id = $1
+       ORDER BY f.field_key`,
       [wardId],
     );
     return result.rows.map((row) => ({
@@ -141,8 +149,11 @@ export class PostgresRescueRepository implements RescueRepository {
       key: asString(row, "field_key"),
       label: asString(row, "label"),
       value: row.value,
-      provenance: asString(row, "provenance") as Provenance,
+      provenance: row.provenance
+        ? (asString(row, "provenance") as Provenance)
+        : "guardian_reported",
       visibility: asString(row, "visibility") as V1Visibility,
+      publicReleaseEligible: Boolean(row.public_release_eligible),
     }));
   }
 

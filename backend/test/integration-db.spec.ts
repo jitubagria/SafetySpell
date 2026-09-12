@@ -1,11 +1,12 @@
 import "reflect-metadata";
 import { randomUUID } from "node:crypto";
 import * as bcrypt from "bcrypt";
-import { INestApplication, ValidationPipe } from "@nestjs/common";
+import { INestApplication } from "@nestjs/common";
 import { Test } from "@nestjs/testing";
 import { Pool } from "pg";
 import * as request from "supertest";
 import { AppModule } from "../src/app.module";
+import { configureApi } from "../src/bootstrap";
 
 const databaseUrl = process.env.INTEGRATION_DATABASE_URL ?? process.env.DATABASE_URL;
 if (!databaseUrl)
@@ -21,6 +22,12 @@ type Seed = {
   tagCode: string;
   guardianId: string;
   password: string;
+};
+type MinimalSeed = Seed & {
+  ageBandFieldId: string;
+  primaryLanguageFieldId: string;
+  reviewerId: string;
+  reviewerPassword: string;
 };
 let app: INestApplication;
 let db: Pool;
@@ -95,6 +102,58 @@ async function seed(
   return { wardId, fieldId, tagCode, guardianId, password };
 }
 
+async function seedMinimalDraft(): Promise<MinimalSeed> {
+  const guardianId = randomUUID();
+  const wardId = randomUUID();
+  const tagCode = randomUUID().replaceAll("-", "");
+  const ageBandFieldId = randomUUID();
+  const primaryLanguageFieldId = randomUUID();
+  const reviewerId = randomUUID();
+  const password = "integration-password";
+  const reviewerPassword = "reviewer-integration-password";
+  await db.query(
+    "INSERT INTO users(id, name, email, password_hash, role) VALUES ($1, 'Guardian', $2, $3, 'guardian'), ($4, 'Reviewer', $5, $6, 'clinical_reviewer')",
+    [
+      guardianId,
+      `${guardianId}@example.test`,
+      await bcrypt.hash(password, 4),
+      reviewerId,
+      `${reviewerId}@example.test`,
+      await bcrypt.hash(reviewerPassword, 4),
+    ],
+  );
+  await db.query("INSERT INTO wards(id, category, name) VALUES ($1, 'medical', 'Minimal ward')", [
+    wardId,
+  ]);
+  await db.query(
+    `INSERT INTO ward_guardians(ward_id, user_id, relationship, authority_basis, active, can_manage_fields, can_manage_public_release)
+     VALUES ($1, $2, 'parent', 'test authority', true, true, true)`,
+    [wardId, guardianId],
+  );
+  await db.query(
+    `INSERT INTO field_catalog(id, category, field_key, label, data_type, max_level, public_eligible, approved, provenance_required, guardian_editable, validation_policy)
+     VALUES
+       ($1, 'medical', 'age_band', 'Age band', 'enum', 'private', false, false, true, true, '{"allowed_values":["child","teen","adult","senior"]}'::jsonb),
+       ($2, 'medical', 'primary_language', 'Primary language', 'enum', 'private', false, false, true, true, '{"allowed_values":["hi","en"]}'::jsonb)`,
+    [ageBandFieldId, primaryLanguageFieldId],
+  );
+  await db.query(
+    "INSERT INTO tags(code, ward_id, category, form, status, activated_at) VALUES ($1, $2, 'medical', 'band', 'active', now())",
+    [tagCode, wardId],
+  );
+  return {
+    wardId,
+    fieldId: ageBandFieldId,
+    tagCode,
+    guardianId,
+    password,
+    ageBandFieldId,
+    primaryLanguageFieldId,
+    reviewerId,
+    reviewerPassword,
+  };
+}
+
 async function tokenForCredentials(email: string, password: string): Promise<string> {
   const response = await request(app.getHttpServer())
     .post("/v1/auth/login")
@@ -114,6 +173,7 @@ beforeAll(async () => {
     "001_rescue_id_v1.sql",
     "002_p0_role_and_scan_log_hardening.sql",
     "003_p0_catalog_value_constraints.sql",
+    "004_minimal_guardian_catalog.sql",
   ]);
   const tables = await db.query(
     "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename",
@@ -147,9 +207,7 @@ beforeAll(async () => {
   );
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
   app = moduleRef.createNestApplication();
-  app.useGlobalPipes(
-    new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }),
-  );
+  configureApi(app);
   await app.init();
 });
 
@@ -301,6 +359,74 @@ describe("Rescue ID live PostgreSQL integration boundary", () => {
       .set("Authorization", `Bearer ${outsider.body.accessToken}`)
       .send({ visibility: "private" })
       .expect(403);
+  });
+
+  it("keeps the minimal guardian fields private until reviewer approval, then releases only them", async () => {
+    const data = await seedMinimalDraft();
+    const guardianToken = await tokenFor(data);
+    const initialFields = await request(app.getHttpServer())
+      .get(`/v1/app/wards/${data.wardId}/fields`)
+      .set("Authorization", `Bearer ${guardianToken}`)
+      .expect(200);
+    expect(initialFields.body).toEqual([
+      expect.objectContaining({
+        catalogId: data.ageBandFieldId,
+        key: "age_band",
+        value: null,
+        visibility: "private",
+        publicReleaseEligible: false,
+      }),
+      expect.objectContaining({
+        catalogId: data.primaryLanguageFieldId,
+        key: "primary_language",
+        value: null,
+        visibility: "private",
+        publicReleaseEligible: false,
+      }),
+    ]);
+    await request(app.getHttpServer())
+      .patch(`/v1/app/wards/${data.wardId}/fields/${data.ageBandFieldId}`)
+      .set("Authorization", `Bearer ${guardianToken}`)
+      .send({ value: "senior" })
+      .expect(200);
+    await request(app.getHttpServer())
+      .patch(`/v1/app/wards/${data.wardId}/fields/${data.primaryLanguageFieldId}`)
+      .set("Authorization", `Bearer ${guardianToken}`)
+      .send({ value: "hi" })
+      .expect(200);
+    await request(app.getHttpServer())
+      .put(`/v1/app/wards/${data.wardId}/fields/${data.ageBandFieldId}/visibility`)
+      .set("Authorization", `Bearer ${guardianToken}`)
+      .send({ visibility: "public" })
+      .expect(403);
+
+    const reviewerToken = await tokenForCredentials(
+      `${data.reviewerId}@example.test`,
+      data.reviewerPassword,
+    );
+    for (const fieldId of [data.ageBandFieldId, data.primaryLanguageFieldId]) {
+      await request(app.getHttpServer())
+        .put(`/v1/staff/catalog/${fieldId}/clinical-approval/public`)
+        .set("Authorization", `Bearer ${reviewerToken}`)
+        .expect(200);
+      await request(app.getHttpServer())
+        .put(`/v1/app/wards/${data.wardId}/fields/${fieldId}/visibility`)
+        .set("Authorization", `Bearer ${guardianToken}`)
+        .send({ visibility: "public" })
+        .expect(200);
+    }
+    const scan = await request(app.getHttpServer())
+      .get(`/v1/public/scan/${data.tagCode}`)
+      .set("Origin", "http://localhost:5173")
+      .expect(200);
+    expect(scan.headers["access-control-allow-origin"]).toBe("http://localhost:5173");
+    expect(scan.body.fields).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ key: "age_band", value: "senior" }),
+        expect.objectContaining({ key: "primary_language", value: "hi" }),
+      ]),
+    );
+    expect(scan.body.fields).toHaveLength(2);
   });
 
   it("returns one neutral scan response for inactive, lost, revoked, and unknown tags", async () => {

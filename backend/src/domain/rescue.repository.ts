@@ -13,9 +13,10 @@ export interface GuardianField {
   catalogId: string;
   key: string;
   label: string;
-  value: unknown;
+  value: unknown | null;
   provenance: Provenance;
   visibility: V1Visibility;
+  publicReleaseEligible: boolean;
 }
 export interface CatalogField {
   id: string;
