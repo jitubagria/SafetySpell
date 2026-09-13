@@ -8,6 +8,18 @@ function allowedOrigins(): string[] {
 }
 
 export function configureApi(app: INestApplication): void {
+  const httpAdapter = app.getHttpAdapter();
+  const rawApp = httpAdapter.getInstance();
+  if (rawApp && typeof rawApp.set === "function") {
+    const rawHops = process.env.TRUST_PROXY_HOPS ?? process.env.TRUST_PROXY ?? "1";
+    if (rawHops === "false" || rawHops === "0") {
+      rawApp.set("trust proxy", false);
+    } else {
+      const hopsNumber = parseInt(rawHops, 10);
+      rawApp.set("trust proxy", Number.isNaN(hopsNumber) ? rawHops : hopsNumber);
+    }
+  }
+
   const origins = allowedOrigins();
   app.enableCors({
     origin(origin: string | undefined, callback: (error: Error | null, allow?: boolean) => void) {

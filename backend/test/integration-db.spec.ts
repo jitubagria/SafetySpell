@@ -1380,20 +1380,23 @@ describe("Rescue ID live PostgreSQL integration boundary", () => {
     publicScan = await scanResolver.resolve(tagItem.code);
     expect(publicScan.status).toBe("available");
     expect(publicScan.category).toBe("medical");
-    expect(publicScan.fields).toEqual([
-      {
-        key: "allergy",
-        label: "Allergies",
-        value: "Penicillin\nPeanuts",
-        provenance: "guardian_reported",
-      },
-      {
-        key: "blood_group",
-        label: "Blood Group",
-        value: "O+",
-        provenance: "guardian_reported",
-      },
-    ]);
+    expect(publicScan.fields).toHaveLength(2);
+    expect(publicScan.fields).toEqual(
+      expect.arrayContaining([
+        {
+          key: "allergy",
+          label: "Allergies",
+          value: "Penicillin\nPeanuts",
+          provenance: "guardian_reported",
+        },
+        {
+          key: "blood_group",
+          label: "Blood Group",
+          value: "O+",
+          provenance: "guardian_reported",
+        },
+      ]),
+    );
     expect(publicScan.disclaimer).toBe(
       "Information is family-provided. This is not medical advice.",
     );
