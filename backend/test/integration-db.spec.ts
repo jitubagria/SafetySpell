@@ -94,8 +94,8 @@ async function seed(
     );
   }
   await db.query(
-    `INSERT INTO tags(code, ward_id, category, category_id, form, status, activated_at)
-     VALUES ($1, $2, 'medical', (SELECT id FROM categories WHERE key = 'medical'), 'band', 'active', now())`,
+    `INSERT INTO tags(code, ward_id, category, category_id, form, status, inventory_status, activated_at)
+     VALUES ($1, $2, 'medical', (SELECT id FROM categories WHERE key = 'medical'), 'band', 'active', 'active', now())`,
     [tagCode, wardId],
   );
   return { wardId, fieldId, tagCode, guardianId, password };
@@ -128,8 +128,8 @@ async function seedMinimalDraft(): Promise<MinimalSeed> {
     [ageBandFieldId, primaryLanguageFieldId],
   );
   await db.query(
-    `INSERT INTO tags(code, ward_id, category, category_id, form, status, activated_at)
-     VALUES ($1, $2, 'medical', (SELECT id FROM categories WHERE key = 'medical'), 'band', 'active', now())`,
+    `INSERT INTO tags(code, ward_id, category, category_id, form, status, inventory_status, activated_at)
+     VALUES ($1, $2, 'medical', (SELECT id FROM categories WHERE key = 'medical'), 'band', 'active', 'active', now())`,
     [tagCode, wardId],
   );
   return {
@@ -168,6 +168,7 @@ beforeAll(async () => {
     "007_blood_group_public_capable.sql",
     "008_category_distributor_commercial_foundation.sql",
     "009_tag_batches.sql",
+    "010_tag_inventory_state.sql",
   ]);
   const tables = await db.query(
     "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename",
