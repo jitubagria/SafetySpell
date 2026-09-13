@@ -8,6 +8,7 @@ import * as request from "supertest";
 import { AppModule } from "../src/app.module";
 import { configureApi } from "../src/bootstrap";
 import { isValidPublicTagCode } from "../src/domain/tag-code";
+import { ScanResolverService } from "../src/scan-resolver/scan-resolver.service";
 import { TagCustodyService } from "../src/tag-custody/tag-custody.service";
 
 const databaseUrl = process.env.INTEGRATION_DATABASE_URL ?? process.env.DATABASE_URL;
@@ -179,6 +180,7 @@ beforeAll(async () => {
     "012_admin_batch_print_version.sql",
     "013_short_public_tag_codes.sql",
     "014_tag_custody_authority.sql",
+    "015_tag_activation_pin_and_claim.sql",
   ]);
   const tables = await db.query(
     "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename",
@@ -952,5 +954,245 @@ describe("Rescue ID live PostgreSQL integration boundary", () => {
     expect(row.holder_kind).toBe("guardian");
     expect(row.holder_guardian_user_id).toBe(guardianId);
     expect(row.holder_distributor_id).toBeNull();
+  });
+
+  it("claims a blank tag with activation PIN, transitioning to assigned status without premature activation", async () => {
+    const adminId = randomUUID();
+    const guardianId = randomUUID();
+    const wardId = randomUUID();
+    const password = "guardian-password";
+    const adminPassword = "admin-password";
+    const email = `${guardianId}@example.test`;
+
+    await db.query(
+      "INSERT INTO users(id, name, email, password_hash, role) VALUES($1, 'Admin', $2, $3, 'company_admin')",
+      [adminId, `${adminId}@example.test`, await bcrypt.hash(adminPassword, 4)],
+    );
+    await db.query(
+      "INSERT INTO users(id, name, email, password_hash, role) VALUES($1, 'Guardian', $2, $3, 'guardian')",
+      [guardianId, email, await bcrypt.hash(password, 4)],
+    );
+    await db.query(
+      "INSERT INTO wards(id, name, category, status) VALUES($1, 'Kamla Devi', 'medical', 'active')",
+      [wardId],
+    );
+    await db.query(
+      `INSERT INTO ward_guardians(ward_id, user_id, relationship, authority_basis, active, can_manage_fields, can_manage_public_release)
+       VALUES($1, $2, 'child', 'family authority', true, true, true)`,
+      [wardId, guardianId],
+    );
+
+    const adminToken = await tokenForCredentials(`${adminId}@example.test`, adminPassword);
+    const guardianToken = await tokenForCredentials(email, password);
+
+    // Admin mints a batch
+    const batch = await request(app.getHttpServer())
+      .post("/v1/admin/tag-batches")
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ categoryKey: "medical", form: "band", quantity: 1 })
+      .expect(201);
+
+    const tagItem = batch.body.tags[0] as { code: string; pin: string };
+    expect(tagItem.code).toBeDefined();
+    expect(tagItem.pin).toHaveLength(6);
+
+    // Before claim, verify tag is blank with hashed PIN
+    const preTag = (
+      await db.query(
+        "SELECT inventory_status, holder_kind, activation_pin_hash, pin_failed_attempts, pin_expires_at, ward_id, activated_at FROM tags WHERE code = $1",
+        [tagItem.code],
+      )
+    ).rows[0];
+    expect(preTag.inventory_status).toBe("blank");
+    expect(preTag.holder_kind).toBe("company");
+    expect(preTag.activation_pin_hash).toBeDefined();
+    expect(preTag.pin_failed_attempts).toBe(0);
+    expect(preTag.ward_id).toBeNull();
+    expect(preTag.activated_at).toBeNull();
+
+    // Guardian claims tag for ward
+    const claimRes = await request(app.getHttpServer())
+      .post(`/v1/app/wards/${wardId}/tags/claim`)
+      .set("Authorization", `Bearer ${guardianToken}`)
+      .send({ tagCode: tagItem.code, pin: tagItem.pin })
+      .expect(201);
+
+    expect(claimRes.body).toEqual({
+      success: true,
+      code: tagItem.code,
+      wardId,
+    });
+
+    // Verify DB state: assigned (NOT active), guardian custody, PIN hash consumed/cleared, activated_at is NULL
+    const postTag = (
+      await db.query(
+        "SELECT inventory_status, status, holder_kind, holder_guardian_user_id, holder_distributor_id, assigned_guardian_user_id, assigned_by_user_id, activation_pin_hash, pin_failed_attempts, pin_locked_until, ward_id, activated_at FROM tags WHERE code = $1",
+        [tagItem.code],
+      )
+    ).rows[0];
+    expect(postTag.inventory_status).toBe("assigned");
+    expect(postTag.status).not.toBe("active");
+    expect(postTag.holder_kind).toBe("guardian");
+    expect(postTag.holder_guardian_user_id).toBe(guardianId);
+    expect(postTag.holder_distributor_id).toBeNull();
+    expect(postTag.assigned_guardian_user_id).toBe(guardianId);
+    expect(postTag.assigned_by_user_id).toBe(guardianId);
+    expect(postTag.activation_pin_hash).toBeNull();
+    expect(postTag.pin_failed_attempts).toBe(0);
+    expect(postTag.pin_locked_until).toBeNull();
+    expect(postTag.ward_id).toBe(wardId);
+    expect(postTag.activated_at).toBeNull();
+
+    // Verify exactly one 'assigned' tag_event (no premature 'activated' event)
+    const events = (
+      await db.query(
+        "SELECT event_type, from_status, to_status, actor_user_id, metadata FROM tag_events WHERE tag_id = (SELECT id FROM tags WHERE code = $1) ORDER BY created_at",
+        [tagItem.code],
+      )
+    ).rows;
+    expect(events).toEqual([
+      {
+        event_type: "assigned",
+        from_status: "blank",
+        to_status: "assigned",
+        actor_user_id: guardianId,
+        metadata: { ward_id: wardId, method: "pin_claim" },
+      },
+    ]);
+
+    // Safety boundary: public scan on newly claimed 'assigned' tag MUST return neutral tag_unavailable
+    const scanResolver = app.get(ScanResolverService);
+    const publicScan = await scanResolver.resolve(tagItem.code);
+    expect(publicScan).toEqual({ status: "tag_unavailable" });
+
+    // Guardian custody authority is immediately valid
+    const custody = app.get(TagCustodyService);
+    await expect(
+      custody.assertMayAct({ id: guardianId, role: "guardian" }, tagItem.code),
+    ).resolves.toBeUndefined();
+  });
+
+  it("enforces anti-enumeration, escalating lockout, and cross-guardian isolation on tag claim", async () => {
+    const adminId = randomUUID();
+    const guardianId = randomUUID();
+    const outsiderId = randomUUID();
+    const wardId = randomUUID();
+    const password = "test-password";
+    const adminPassword = "admin-password";
+
+    await db.query(
+      "INSERT INTO users(id, name, email, password_hash, role) VALUES($1, 'Admin', $2, $3, 'company_admin')",
+      [adminId, `${adminId}@example.test`, await bcrypt.hash(adminPassword, 4)],
+    );
+    await db.query(
+      `INSERT INTO users(id, name, email, password_hash, role)
+       VALUES($1, 'Guardian', $2, $4, 'guardian'),
+             ($3, 'Outsider', $5, $4, 'guardian')`,
+      [
+        guardianId,
+        `${guardianId}@example.test`,
+        outsiderId,
+        await bcrypt.hash(password, 4),
+        `${outsiderId}@example.test`,
+      ],
+    );
+    await db.query(
+      "INSERT INTO wards(id, name, category, status) VALUES($1, 'Ward', 'medical', 'active')",
+      [wardId],
+    );
+    await db.query(
+      `INSERT INTO ward_guardians(ward_id, user_id, relationship, authority_basis, active, can_manage_fields, can_manage_public_release)
+       VALUES($1, $2, 'relative', 'auth', true, true, true)`,
+      [wardId, guardianId],
+    );
+
+    const adminToken = await tokenForCredentials(`${adminId}@example.test`, adminPassword);
+    const guardianToken = await tokenForCredentials(`${guardianId}@example.test`, password);
+    const outsiderToken = await tokenForCredentials(`${outsiderId}@example.test`, password);
+
+    // Outsider cannot claim for someone else's ward
+    await request(app.getHttpServer())
+      .post(`/v1/app/wards/${wardId}/tags/claim`)
+      .set("Authorization", `Bearer ${outsiderToken}`)
+      .send({ tagCode: "SS-0000-0000", pin: "123456" })
+      .expect(403);
+
+    // Nonexistent tag code -> neutral 400
+    const nonExistentRes = await request(app.getHttpServer())
+      .post(`/v1/app/wards/${wardId}/tags/claim`)
+      .set("Authorization", `Bearer ${guardianToken}`)
+      .send({ tagCode: "SS-NONEXIST-00", pin: "123456" })
+      .expect(400);
+    expect(nonExistentRes.body.message).toBe("Invalid tag code or activation PIN");
+
+    // Mint a real tag
+    const batch = await request(app.getHttpServer())
+      .post("/v1/admin/tag-batches")
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ categoryKey: "medical", form: "band", quantity: 1 })
+      .expect(201);
+    const tagItem = batch.body.tags[0] as { code: string; pin: string };
+
+    // 4 failed attempts -> 400 neutral
+    for (let i = 1; i <= 4; i++) {
+      const wrongPinRes = await request(app.getHttpServer())
+        .post(`/v1/app/wards/${wardId}/tags/claim`)
+        .set("Authorization", `Bearer ${guardianToken}`)
+        .send({ tagCode: tagItem.code, pin: "WRONGP" })
+        .expect(400);
+      expect(wrongPinRes.body.message).toBe("Invalid tag code or activation PIN");
+    }
+
+    const midTag = (
+      await db.query("SELECT pin_failed_attempts, pin_locked_until FROM tags WHERE code = $1", [
+        tagItem.code,
+      ])
+    ).rows[0];
+    expect(midTag.pin_failed_attempts).toBe(4);
+    expect(midTag.pin_locked_until).toBeNull();
+
+    // 5th failed attempt -> locks tag for 15 minutes
+    await request(app.getHttpServer())
+      .post(`/v1/app/wards/${wardId}/tags/claim`)
+      .set("Authorization", `Bearer ${guardianToken}`)
+      .send({ tagCode: tagItem.code, pin: "WRONGP" })
+      .expect(400);
+
+    const lockedTag = (
+      await db.query("SELECT pin_failed_attempts, pin_locked_until FROM tags WHERE code = $1", [
+        tagItem.code,
+      ])
+    ).rows[0];
+    expect(lockedTag.pin_failed_attempts).toBe(5);
+    expect(lockedTag.pin_locked_until).toBeDefined();
+    expect(new Date(lockedTag.pin_locked_until).getTime()).toBeGreaterThan(Date.now());
+
+    // 6th attempt with CORRECT PIN while locked -> rejected with neutral 400
+    const lockedRes = await request(app.getHttpServer())
+      .post(`/v1/app/wards/${wardId}/tags/claim`)
+      .set("Authorization", `Bearer ${guardianToken}`)
+      .send({ tagCode: tagItem.code, pin: tagItem.pin })
+      .expect(400);
+    expect(lockedRes.body.message).toBe("Invalid tag code or activation PIN");
+
+    // Unlock tag artificially and claim successfully
+    await db.query(
+      "UPDATE tags SET pin_failed_attempts = 0, pin_locked_until = NULL WHERE code = $1",
+      [tagItem.code],
+    );
+
+    await request(app.getHttpServer())
+      .post(`/v1/app/wards/${wardId}/tags/claim`)
+      .set("Authorization", `Bearer ${guardianToken}`)
+      .send({ tagCode: tagItem.code, pin: tagItem.pin })
+      .expect(201);
+
+    // Attempting to claim the already claimed tag again -> neutral 400
+    const reClaimRes = await request(app.getHttpServer())
+      .post(`/v1/app/wards/${wardId}/tags/claim`)
+      .set("Authorization", `Bearer ${guardianToken}`)
+      .send({ tagCode: tagItem.code, pin: tagItem.pin })
+      .expect(400);
+    expect(reClaimRes.body.message).toBe("Invalid tag code or activation PIN");
   });
 });

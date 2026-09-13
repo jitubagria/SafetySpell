@@ -1,10 +1,11 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
+import * as bcrypt from "bcrypt";
 import { randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
 import * as QRCode from "qrcode";
 import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
 import { DatabaseService } from "../database/database.service";
-import { createPublicTagCode, normalizeTagCode } from "../domain/tag-code";
+import { createActivationPin, createPublicTagCode, normalizeTagCode } from "../domain/tag-code";
 
 const commonJsRequire = createRequire(__filename);
 const pointsPerMillimetre = 72 / 25.4;
@@ -31,20 +32,26 @@ export class AdminTagsService {
         [batchCode, category.rows[0]!.id, input.form, input.quantity, actor],
       );
       const codes: string[] = [];
+      const tags: Array<{ code: string; pin: string }> = [];
       let attempts = 0;
       while (codes.length < input.quantity) {
         if (attempts++ > input.quantity * 10) {
           throw new BadRequestException("Could not allocate unique tag codes");
         }
         const value = createPublicTagCode();
+        const pin = createActivationPin();
+        const pinHash = await bcrypt.hash(pin, 8);
         const inserted = await client.query(
-          `INSERT INTO tags(code,batch_id,category,category_id,form,status,inventory_status,holder_kind)
-           VALUES($1,$2,$3,$4,$5,'manufactured','blank','company') ON CONFLICT DO NOTHING RETURNING code`,
-          [value, batch.rows[0]!.id, input.categoryKey, category.rows[0]!.id, input.form],
+          `INSERT INTO tags(code,batch_id,category,category_id,form,status,inventory_status,holder_kind,activation_pin_hash,pin_expires_at)
+           VALUES($1,$2,$3,$4,$5,'manufactured','blank','company',$6,now() + interval '1 year') ON CONFLICT DO NOTHING RETURNING code`,
+          [value, batch.rows[0]!.id, input.categoryKey, category.rows[0]!.id, input.form, pinHash],
         );
-        if (inserted.rowCount) codes.push(value);
+        if (inserted.rowCount) {
+          codes.push(value);
+          tags.push({ code: value, pin });
+        }
       }
-      return { id: batch.rows[0]!.id, batchCode, codes };
+      return { id: batch.rows[0]!.id, batchCode, codes, tags };
     });
   }
   private async tag(tagCode: string) {

@@ -12,6 +12,7 @@ import { ScanAuditModule } from "./scan-audit/scan-audit.module";
 import { ScanResolverModule } from "./scan-resolver/scan-resolver.module";
 import { TagLifecycleModule } from "./tag-lifecycle/tag-lifecycle.module";
 import { TagCustodyModule } from "./tag-custody/tag-custody.module";
+import { TagAssignmentModule } from "./tag-assignment/tag-assignment.module";
 import { WardGuardiansModule } from "./ward-guardians/ward-guardians.module";
 
 @Module({
@@ -54,6 +55,7 @@ import { WardGuardiansModule } from "./ward-guardians/ward-guardians.module";
     ConsentPrivacyModule,
     TagLifecycleModule,
     TagCustodyModule,
+    TagAssignmentModule,
     ScanResolverModule,
     ScanAuditModule,
     PrivacyNoticeModule,

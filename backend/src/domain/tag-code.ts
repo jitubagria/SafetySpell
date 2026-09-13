@@ -34,3 +34,11 @@ export function isValidPublicTagCode(value: string): boolean {
   const payload = `${match[1]!}${match[2]!.slice(0, 3)}`;
   return checksum(payload) === match[2]!.slice(3);
 }
+
+export function createActivationPin(): string {
+  return [...randomBytes(6)].map((byte) => alphabet[byte & 31]).join("");
+}
+
+export function normalizeActivationPin(value: string): string {
+  return value.trim().toUpperCase().replaceAll("-", "");
+}
