@@ -3,6 +3,7 @@ import { ConfigModule } from "@nestjs/config";
 import { APP_GUARD } from "@nestjs/core";
 import { ThrottlerGuard, ThrottlerModule } from "@nestjs/throttler";
 import { AccountsModule } from "./accounts/accounts.module";
+import { AdminTagsModule } from "./admin-tags/admin-tags.module";
 import { ConsentPrivacyModule } from "./consent-privacy/consent-privacy.module";
 import { DatabaseModule } from "./database/database.module";
 import { PrivacyNoticeModule } from "./privacy-notice/privacy-notice.module";
@@ -26,9 +27,27 @@ import { WardGuardiansModule } from "./ward-guardians/ward-guardians.module";
         return config;
       },
     }),
-    ThrottlerModule.forRoot([{ ttl: 60_000, limit: 100 }]),
+    ThrottlerModule.forRoot([
+      { name: "default", ttl: 60_000, limit: 100 },
+      {
+        name: "scanCode",
+        ttl: 60_000,
+        limit: 5,
+        // The public route also retains its stricter per-IP bucket. This bucket
+        // intentionally groups all source IPs by the normalized public code.
+        getTracker: (request) =>
+          String(request.params?.tagCode ?? "")
+            .trim()
+            .toUpperCase(),
+        skipIf: (context) => {
+          const request = context.switchToHttp().getRequest<{ path?: string }>();
+          return !request.path?.startsWith("/v1/public/scan/");
+        },
+      },
+    ]),
     DatabaseModule,
     AccountsModule,
+    AdminTagsModule,
     WardGuardiansModule,
     ProfileModule,
     ConsentPrivacyModule,

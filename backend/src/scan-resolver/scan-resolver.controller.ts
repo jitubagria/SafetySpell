@@ -7,7 +7,7 @@ export class ScanResolverController {
   constructor(private readonly scanResolver: ScanResolverService) {}
 
   @Get(":tagCode")
-  @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  @Throttle({ default: { limit: 30, ttl: 60_000 }, scanCode: { limit: 5, ttl: 60_000 } })
   scan(@Param("tagCode") tagCode: string, @Req() request: { ip?: string }) {
     return this.scanResolver.resolve(tagCode, request.ip);
   }

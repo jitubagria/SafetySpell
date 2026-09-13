@@ -7,6 +7,7 @@ import { Pool } from "pg";
 import * as request from "supertest";
 import { AppModule } from "../src/app.module";
 import { configureApi } from "../src/bootstrap";
+import { isValidPublicTagCode } from "../src/domain/tag-code";
 
 const databaseUrl = process.env.INTEGRATION_DATABASE_URL ?? process.env.DATABASE_URL;
 if (!databaseUrl)
@@ -32,13 +33,15 @@ let db: Pool;
 
 const testTables = [
   "scan_log",
+  "tag_events",
+  "tags",
+  "tag_batches",
   "guidance_rule_versions",
   "guidance_rules",
   "privacy_notices",
   "consent_audit",
   "ward_field_visibility",
   "ward_field_values",
-  "tags",
   "ward_guardians",
   "field_catalog",
   "wards",
@@ -170,6 +173,8 @@ beforeAll(async () => {
     "009_tag_batches.sql",
     "010_tag_inventory_state.sql",
     "011_tag_events.sql",
+    "012_admin_batch_print_version.sql",
+    "013_short_public_tag_codes.sql",
   ]);
   const tables = await db.query(
     "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename",
@@ -207,6 +212,7 @@ beforeAll(async () => {
       "guidance_versions_no_update",
       "tag_events_no_delete",
       "tag_events_no_update",
+      "tags_code_no_update",
     ]),
   );
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
@@ -585,6 +591,21 @@ describe("Rescue ID live PostgreSQL integration boundary", () => {
       .expect(403);
   });
 
+  it("limits a public code independently while retaining the per-IP scan limit", async () => {
+    const first = await seed();
+    const secondCode = randomUUID().replaceAll("-", "");
+    await db.query(
+      `INSERT INTO tags(code, ward_id, category, category_id, form, status, inventory_status, activated_at)
+       VALUES($1, $2, 'medical', (SELECT id FROM categories WHERE key = 'medical'), 'band', 'active', 'active', now())`,
+      [secondCode, first.wardId],
+    );
+    for (let count = 0; count < 5; count += 1) {
+      await request(app.getHttpServer()).get(`/v1/public/scan/${first.tagCode}`).expect(200);
+      await request(app.getHttpServer()).get(`/v1/public/scan/${secondCode}`).expect(200);
+    }
+    await request(app.getHttpServer()).get(`/v1/public/scan/${first.tagCode}`).expect(429);
+  });
+
   it("triggers the public scan rate limit over HTTP", async () => {
     const data = await seed();
     const statuses: number[] = [];
@@ -595,4 +616,56 @@ describe("Rescue ID live PostgreSQL integration boundary", () => {
     }
     expect(statuses).toContain(429);
   });
+
+  it("allows only an admin to mint a blank batch with short checksummed immutable codes", async () => {
+    const adminId = randomUUID();
+    await db.query(
+      "INSERT INTO users(id, name, email, password_hash, role) VALUES ($1, 'Admin', $2, $3, 'company_admin')",
+      [adminId, `${adminId}@example.test`, await bcrypt.hash("admin-password", 4)],
+    );
+    const token = await tokenForCredentials(`${adminId}@example.test`, "admin-password");
+    const response = await request(app.getHttpServer())
+      .post("/v1/admin/tag-batches")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ categoryKey: "medical", form: "band", quantity: 2 })
+      .expect(201);
+    expect(response.body.codes).toHaveLength(2);
+    expect(response.body.codes).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/^SS-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$/),
+      ]),
+    );
+    const generatedCode = response.body.codes[0] as string;
+    expect(isValidPublicTagCode(generatedCode)).toBe(true);
+    const wrongChecksum = `${generatedCode.slice(0, -1)}${generatedCode.endsWith("A") ? "B" : "A"}`;
+    expect(isValidPublicTagCode(wrongChecksum)).toBe(false);
+    expect(
+      (
+        await db.query("SELECT inventory_status, ward_id FROM tags WHERE batch_id = $1", [
+          response.body.id,
+        ])
+      ).rows,
+    ).toEqual([
+      { inventory_status: "blank", ward_id: null },
+      { inventory_status: "blank", ward_id: null },
+    ]);
+    const png = await request(app.getHttpServer())
+      .get(`/v1/admin/tag-batches/tags/${response.body.codes[0]}.png`)
+      .set("Authorization", `Bearer ${token}`)
+      .expect("Content-Type", /image\/png/)
+      .expect(200);
+    expect(png.body.subarray(1, 4).toString()).toBe("PNG");
+    const pdf = await request(app.getHttpServer())
+      .get(`/v1/admin/tag-batches/${response.body.id}/print.pdf`)
+      .set("Authorization", `Bearer ${token}`)
+      .expect("Content-Type", /application\/pdf/)
+      .expect(200);
+    expect(pdf.body.subarray(0, 4).toString()).toBe("%PDF");
+    await expect(
+      db.query("UPDATE tags SET code = $1 WHERE code = $2", [
+        "SS-ABCD-EFGH",
+        response.body.codes[0],
+      ]),
+    ).rejects.toThrow("tag codes are immutable");
+  }, 30_000);
 });

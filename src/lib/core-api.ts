@@ -136,3 +136,32 @@ export function setVisibility(
 export function scanTag(tagCode: string): Promise<ApiScanResponse> {
   return call<ApiScanResponse>(`/v1/public/scan/${encodeURIComponent(tagCode)}`);
 }
+
+export interface ApiTagBatch {
+  id: string;
+  batchCode: string;
+  codes: string[];
+}
+export function createTagBatch(
+  token: string,
+  input: { categoryKey: string; form: string; quantity: number },
+): Promise<ApiTagBatch> {
+  return call("/v1/admin/tag-batches", { method: "POST", body: JSON.stringify(input) }, token);
+}
+
+async function downloadAdminArtifact(token: string, path: string): Promise<Blob> {
+  const response = await fetch(endpoint(path), { headers: { Authorization: `Bearer ${token}` } });
+  if (!response.ok) throw new CoreApiError(`Download failed (${response.status})`, response.status);
+  return response.blob();
+}
+
+export function downloadAdminTagPng(token: string, code: string): Promise<Blob> {
+  return downloadAdminArtifact(token, `/v1/admin/tag-batches/tags/${encodeURIComponent(code)}.png`);
+}
+
+export function downloadAdminBatchPdf(token: string, batchId: string): Promise<Blob> {
+  return downloadAdminArtifact(
+    token,
+    `/v1/admin/tag-batches/${encodeURIComponent(batchId)}/print.pdf`,
+  );
+}

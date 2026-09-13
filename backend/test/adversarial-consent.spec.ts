@@ -3,6 +3,7 @@ import { ExecutionContext } from "@nestjs/common";
 import { Reflector } from "@nestjs/core";
 import { RolesGuard } from "../src/common/request-user";
 import { ConsentPrivacyService } from "../src/consent-privacy/consent-privacy.service";
+import { createPublicTagCode } from "../src/domain/tag-code";
 import { RescueRepository } from "../src/domain/rescue.repository";
 import { ScanLogIpHasher, hmacScanIp } from "../src/scan-resolver/scan-log-ip-hasher";
 import { ScanResolverService } from "../src/scan-resolver/scan-resolver.service";
@@ -76,6 +77,21 @@ describe("Rescue ID V1 adversarial consent boundary", () => {
     expect(repo.writeScanLog).toHaveBeenCalledWith(
       expect.objectContaining({ shownFieldKeys: ["blood_group"] }),
     );
+  });
+
+  it("makes a bad short-code checksum indistinguishable in response shape from an unknown tag", async () => {
+    const repo = baseRepository();
+    repo.findActiveTag.mockResolvedValue(null);
+    const service = new ScanResolverService(repo, hashIp());
+    const unknown = await service.resolve("unknown-long-legacy-code");
+    const validCode = createPublicTagCode();
+    const badChecksum = `${validCode.slice(0, -1)}${validCode.endsWith("A") ? "B" : "A"}`;
+    const badChecksumResponse = await service.resolve(badChecksum);
+
+    expect(badChecksumResponse).toEqual(unknown);
+    // The checksum path deliberately avoids a resolver lookup; its database
+    // timing is therefore not claimed to be indistinguishable.
+    expect(repo.findActiveTag).toHaveBeenCalledTimes(1);
   });
 
   it("returns the same neutral response for an inactive, lost, revoked, or unknown tag", async () => {

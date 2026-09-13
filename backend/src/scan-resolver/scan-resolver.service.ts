@@ -1,5 +1,6 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { RESCUE_REPOSITORY, RescueRepository } from "../domain/rescue.repository";
+import { isValidPublicTagCode, normalizeTagCode } from "../domain/tag-code";
 import { PublicScanResponse } from "../domain/types";
 import { ScanLogIpHasher } from "./scan-log-ip-hasher";
 
@@ -11,7 +12,11 @@ export class ScanResolverService {
   ) {}
 
   async resolve(tagCode: string, ip?: string): Promise<PublicScanResponse> {
-    const tag = await this.repository.findActiveTag(tagCode);
+    const normalizedCode = normalizeTagCode(tagCode);
+    // A bad short-code checksum is neutral and is rejected before the database.
+    // Long legacy codes remain supported until old printed stock is exhausted.
+    if (!isValidPublicTagCode(normalizedCode)) return { status: "tag_unavailable" };
+    const tag = await this.repository.findActiveTag(normalizedCode);
     // Identical response for unknown, inactive, lost and revoked codes.
     if (!tag) return { status: "tag_unavailable" };
     const projection = await this.repository.getFilteredPublicProjection(tag.wardId);

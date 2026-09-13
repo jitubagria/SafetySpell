@@ -21,7 +21,7 @@ export class PostgresRescueRepository implements RescueRepository {
     const result = await this.db.query<Row>(
       `SELECT t.id, t.ward_id, t.category FROM tags t
        JOIN wards w ON w.id = t.ward_id AND w.status = 'active'
-       WHERE t.code = $1 AND t.status = 'active' AND t.ward_id IS NOT NULL`,
+       WHERE upper(t.code) = upper($1) AND t.status = 'active' AND t.ward_id IS NOT NULL`,
       [code],
     );
     const row = result.rows[0];
