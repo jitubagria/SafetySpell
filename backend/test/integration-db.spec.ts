@@ -169,6 +169,7 @@ beforeAll(async () => {
     "008_category_distributor_commercial_foundation.sql",
     "009_tag_batches.sql",
     "010_tag_inventory_state.sql",
+    "011_tag_events.sql",
   ]);
   const tables = await db.query(
     "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename",
@@ -183,6 +184,7 @@ beforeAll(async () => {
       "field_catalog",
       "scan_log",
       "tag_batches",
+      "tag_events",
       "tags",
       "ward_field_values",
       "ward_field_visibility",
@@ -203,6 +205,8 @@ beforeAll(async () => {
       "consent_audit_no_update",
       "guidance_versions_no_delete",
       "guidance_versions_no_update",
+      "tag_events_no_delete",
+      "tag_events_no_update",
     ]),
   );
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
