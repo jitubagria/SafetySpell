@@ -196,22 +196,24 @@ export class TagAssignmentService {
       );
     }
 
-    // 3. Enforce safety gate: ward MUST have at least one field released for public scan
-    const publicReleaseCountResult = await this.db.query<{ count: string }>(
+    // 3. Enforce safety gate: at least one public-released approved field MUST have non-empty profile data
+    const releasedDataCountResult = await this.db.query<{ count: string }>(
       `SELECT count(*)::text as count
-       FROM ward_field_visibility v
+       FROM ward_field_values v
+       JOIN ward_field_visibility vis ON vis.ward_id = v.ward_id AND vis.field_catalog_id = v.field_catalog_id
        JOIN field_catalog f ON f.id = v.field_catalog_id
        WHERE v.ward_id = $1
-         AND v.visibility = 'public'
+         AND v.value IS NOT NULL AND v.value::text NOT IN ('null', '""', '{}')
+         AND vis.visibility = 'public'
          AND f.approved = true
          AND f.public_eligible = true
          AND f.max_level = 'public'`,
       [wardId],
     );
-    const hasPublicRelease = parseInt(publicReleaseCountResult.rows[0]?.count ?? "0", 10) > 0;
-    if (!hasPublicRelease) {
+    const hasReleasedData = parseInt(releasedDataCountResult.rows[0]?.count ?? "0", 10) > 0;
+    if (!hasReleasedData) {
       throw new BadRequestException(
-        "Cannot activate tag: no fields have been released for public scan. Set at least one field to public before activation.",
+        "Cannot activate tag: no public-released field contains profile data. Fill data for a released field before activation.",
       );
     }
 

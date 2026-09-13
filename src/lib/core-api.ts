@@ -158,6 +158,68 @@ export function activateTag(
   );
 }
 
+export interface ApiInventoryItem {
+  id: string;
+  code: string;
+  category: string;
+  form: string;
+  status: "blank" | "assigned" | "active" | "lost" | "revoked";
+  holderKind: "company" | "distributor" | "guardian";
+  distributorName?: string | null;
+  sourceDistributorName?: string | null;
+  assignedReference: string | null;
+  createdAt: string;
+  assignedAt: string | null;
+  activatedAt: string | null;
+  statusChangedAt: string | null;
+}
+
+export interface ApiInventoryCounts {
+  blank: number;
+  assigned: number;
+  active: number;
+  lost: number;
+  revoked: number;
+  total: number;
+}
+
+export interface ApiInventoryResult {
+  items: ApiInventoryItem[];
+  total: number;
+  page: number;
+  limit: number;
+  counts: ApiInventoryCounts;
+}
+
+export interface ApiInventoryQuery {
+  status?: "blank" | "assigned" | "active" | "lost" | "revoked";
+  categoryKey?: string;
+  distributorId?: string;
+  search?: string;
+  fromDate?: string;
+  toDate?: string;
+  page?: number;
+  limit?: number;
+}
+
+export function listInventory(
+  token: string,
+  query: ApiInventoryQuery = {},
+): Promise<ApiInventoryResult> {
+  const params = new URLSearchParams();
+  if (query.status) params.set("status", query.status);
+  if (query.categoryKey) params.set("categoryKey", query.categoryKey);
+  if (query.distributorId) params.set("distributorId", query.distributorId);
+  if (query.search) params.set("search", query.search);
+  if (query.fromDate) params.set("fromDate", query.fromDate);
+  if (query.toDate) params.set("toDate", query.toDate);
+  if (query.page) params.set("page", String(query.page));
+  if (query.limit) params.set("limit", String(query.limit));
+
+  const qs = params.toString();
+  return call<ApiInventoryResult>(`/v1/inventory/tags${qs ? `?${qs}` : ""}`, {}, token);
+}
+
 export function scanTag(tagCode: string): Promise<ApiScanResponse> {
   return call<ApiScanResponse>(`/v1/public/scan/${encodeURIComponent(tagCode)}`);
 }

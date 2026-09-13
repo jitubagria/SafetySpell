@@ -7,7 +7,7 @@ import { Pool } from "pg";
 import * as request from "supertest";
 import { AppModule } from "../src/app.module";
 import { configureApi } from "../src/bootstrap";
-import { isValidPublicTagCode } from "../src/domain/tag-code";
+import { createPublicTagCode, isValidPublicTagCode } from "../src/domain/tag-code";
 import { ScanResolverService } from "../src/scan-resolver/scan-resolver.service";
 import { TagCustodyService } from "../src/tag-custody/tag-custody.service";
 
@@ -1307,7 +1307,7 @@ describe("Rescue ID live PostgreSQL integration boundary", () => {
       .post(`/v1/app/wards/${wardId}/tags/${tagItem.code}/activate`)
       .set("Authorization", `Bearer ${guardianToken}`)
       .expect(400);
-    expect(noConsentRes.body.message).toContain("no fields have been released for public scan");
+    expect(noConsentRes.body.message).toContain("no public-released field contains profile data");
 
     // GATE 3: Outsider guardian attempts to activate tag -> rejected
     await request(app.getHttpServer())
@@ -1382,15 +1382,15 @@ describe("Rescue ID live PostgreSQL integration boundary", () => {
     expect(publicScan.category).toBe("medical");
     expect(publicScan.fields).toEqual([
       {
-        key: "blood_group",
-        label: "Blood Group",
-        value: "O+",
-        provenance: "guardian_reported",
-      },
-      {
         key: "allergy",
         label: "Allergies",
         value: "Penicillin\nPeanuts",
+        provenance: "guardian_reported",
+      },
+      {
+        key: "blood_group",
+        label: "Blood Group",
+        value: "O+",
         provenance: "guardian_reported",
       },
     ]);
@@ -1409,5 +1409,315 @@ describe("Rescue ID live PostgreSQL integration boundary", () => {
         form: "card",
       },
     ]);
+  });
+
+  it("strictly rejects activation when data is in field A but public toggle is on empty field B", async () => {
+    const adminId = randomUUID();
+    const guardianId = randomUUID();
+    const wardId = randomUUID();
+    const password = "test-password";
+    const adminPassword = "admin-password";
+
+    await db.query(
+      "INSERT INTO users(id, name, email, password_hash, role) VALUES($1, 'Admin', $2, $3, 'company_admin')",
+      [adminId, `${adminId}@example.test`, await bcrypt.hash(adminPassword, 4)],
+    );
+    await db.query(
+      "INSERT INTO users(id, name, email, password_hash, role) VALUES($1, 'Guardian', $2, $3, 'guardian')",
+      [guardianId, `${guardianId}@example.test`, await bcrypt.hash(password, 4)],
+    );
+    await db.query(
+      "INSERT INTO wards(id, name, category, status) VALUES($1, 'Ward Beta', 'medical', 'active')",
+      [wardId],
+    );
+    await db.query(
+      `INSERT INTO ward_guardians(ward_id, user_id, relationship, authority_basis, can_manage_fields, can_manage_public_release, active)
+       VALUES($1, $2, 'parent', 'power_of_attorney', true, true, true)`,
+      [wardId, guardianId],
+    );
+
+    const adminToken = (
+      await request(app.getHttpServer())
+        .post("/v1/auth/login")
+        .send({ email: `${adminId}@example.test`, password: adminPassword })
+        .expect(201)
+    ).body.accessToken;
+
+    const guardianToken = (
+      await request(app.getHttpServer())
+        .post("/v1/auth/login")
+        .send({ email: `${guardianId}@example.test`, password })
+        .expect(201)
+    ).body.accessToken;
+
+    const bloodGroupId = randomUUID();
+    const allergyId = randomUUID();
+    await db.query(
+      `INSERT INTO field_catalog(id, category, field_key, label, data_type, max_level, public_eligible, approved, provenance_required, guardian_editable, validation_policy)
+       VALUES
+         ($1, 'medical', 'blood_group', 'Blood Group', 'enum', 'public', true, true, true, true, '{"allowed_values":["O+"]}'::jsonb),
+         ($2, 'medical', 'allergy', 'Allergies', 'text', 'public', true, true, true, true, '{"max_length":1000}'::jsonb)`,
+      [bloodGroupId, allergyId],
+    );
+
+    const batchRes = await request(app.getHttpServer())
+      .post("/v1/admin/tag-batches")
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ categoryKey: "medical", form: "card", quantity: 1 })
+      .expect(201);
+    const tagItem = batchRes.body.tags[0];
+
+    await request(app.getHttpServer())
+      .post(`/v1/app/wards/${wardId}/tags/claim`)
+      .set("Authorization", `Bearer ${guardianToken}`)
+      .send({ tagCode: tagItem.code, pin: tagItem.pin })
+      .expect(201);
+
+    // Guardian fills data for allergy (field A) ONLY
+    await request(app.getHttpServer())
+      .patch(`/v1/app/wards/${wardId}/fields/${allergyId}`)
+      .set("Authorization", `Bearer ${guardianToken}`)
+      .send({ value: "Penicillin" })
+      .expect(200);
+
+    // Guardian toggles visibility for blood_group (field B, which is EMPTY) to public
+    await request(app.getHttpServer())
+      .put(`/v1/app/wards/${wardId}/fields/${bloodGroupId}/visibility`)
+      .set("Authorization", `Bearer ${guardianToken}`)
+      .send({ visibility: "public" })
+      .expect(200);
+
+    // TRAP CHECK: Attempt to activate tag -> MUST be rejected because the released field is empty!
+    const mismatchedRes = await request(app.getHttpServer())
+      .post(`/v1/app/wards/${wardId}/tags/${tagItem.code}/activate`)
+      .set("Authorization", `Bearer ${guardianToken}`)
+      .expect(400);
+    expect(mismatchedRes.body.message).toContain("no public-released field contains profile data");
+
+    // Now guardian releases the populated field (allergy) to public
+    await request(app.getHttpServer())
+      .put(`/v1/app/wards/${wardId}/fields/${allergyId}/visibility`)
+      .set("Authorization", `Bearer ${guardianToken}`)
+      .send({ visibility: "public" })
+      .expect(200);
+
+    // Activation now succeeds!
+    await request(app.getHttpServer())
+      .post(`/v1/app/wards/${wardId}/tags/${tagItem.code}/activate`)
+      .set("Authorization", `Bearer ${guardianToken}`)
+      .expect(201);
+  });
+
+  it("enforces role-scoped inventory listing, masked references for distributors, 5-state count strips, and zero health data leak", async () => {
+    const adminId = randomUUID();
+    const distAlphaUserId = randomUUID();
+    const distBetaUserId = randomUUID();
+    const distAlphaId = randomUUID();
+    const distBetaId = randomUUID();
+    const guardianId = randomUUID();
+    const wardId = randomUUID();
+    const password = "test-password";
+    const adminPassword = "admin-password";
+
+    // Create distributors
+    await db.query(
+      `INSERT INTO distributors(id, name, status)
+       VALUES ($1, 'Distributor Alpha', 'active'),
+              ($2, 'Distributor Beta', 'active')`,
+      [distAlphaId, distBetaId],
+    );
+
+    // Create users
+    await db.query(
+      `INSERT INTO users(id, name, email, password_hash, role, distributor_id)
+       VALUES
+         ($1, 'Admin', $2, $6, 'company_admin', NULL),
+         ($3, 'Dist Alpha User', $4, $6, 'distributor', $7),
+         ($5, 'Dist Beta User', $8, $6, 'distributor', $9)`,
+      [
+        adminId,
+        `${adminId}@example.test`,
+        distAlphaUserId,
+        `${distAlphaUserId}@example.test`,
+        distBetaUserId,
+        await bcrypt.hash(adminPassword, 4),
+        distAlphaId,
+        `${distBetaUserId}@example.test`,
+        distBetaId,
+      ],
+    );
+
+    await db.query(
+      "INSERT INTO users(id, name, email, password_hash, role) VALUES($1, 'Guardian', $2, $3, 'guardian')",
+      [guardianId, `${guardianId}@example.test`, await bcrypt.hash(password, 4)],
+    );
+    await db.query(
+      "INSERT INTO wards(id, name, category, status) VALUES($1, 'Ward Medical', 'medical', 'active')",
+      [wardId],
+    );
+    await db.query(
+      `INSERT INTO ward_guardians(ward_id, user_id, relationship, authority_basis, can_manage_fields, can_manage_public_release, active)
+       VALUES($1, $2, 'parent', 'power_of_attorney', true, true, true)`,
+      [wardId, guardianId],
+    );
+
+    // Seed 6 tags across inventory states and holders:
+    // Tag 1: Blank, held by company
+    // Tag 2: Blank, held by Dist Alpha
+    // Tag 3: Blank, held by Dist Beta
+    // Tag 4: Assigned, originated from Dist Alpha, assigned to Ward
+    // Tag 5: Active, originated from Dist Alpha, active on Ward
+    // Tag 6: Lost, originated from Dist Beta
+    const tag1Code = createPublicTagCode();
+    const tag2Code = createPublicTagCode();
+    const tag3Code = createPublicTagCode();
+    const tag4Code = createPublicTagCode();
+    const tag5Code = createPublicTagCode();
+    const tag6Code = createPublicTagCode();
+
+    const medCatId = (await db.query("SELECT id FROM categories WHERE key = 'medical'")).rows[0]
+      ?.id;
+
+    await db.query(
+      `INSERT INTO tags(id, code, category, category_id, form, status, inventory_status, holder_kind, holder_distributor_id, source_distributor_id, holder_guardian_user_id, ward_id, assigned_at, activated_at, status_changed_at)
+       VALUES
+         (gen_random_uuid(), $1, 'medical', $7, 'card', 'manufactured', 'blank', 'company', NULL, NULL, NULL, NULL, NULL, NULL, now()),
+         (gen_random_uuid(), $2, 'medical', $7, 'card', 'allocated', 'blank', 'distributor', $8, $8, NULL, NULL, NULL, NULL, now()),
+         (gen_random_uuid(), $3, 'medical', $7, 'card', 'allocated', 'blank', 'distributor', $9, $9, NULL, NULL, NULL, NULL, now()),
+         (gen_random_uuid(), $4, 'medical', $7, 'band', 'sold', 'assigned', 'guardian', NULL, $8, $10, $11, now(), NULL, now()),
+         (gen_random_uuid(), $5, 'medical', $7, 'band', 'active', 'active', 'guardian', NULL, $8, $10, $11, now(), now(), now()),
+         (gen_random_uuid(), $6, 'medical', $7, 'sticker', 'lost', 'lost', 'distributor', $9, $9, NULL, NULL, NULL, NULL, now())`,
+      [
+        tag1Code,
+        tag2Code,
+        tag3Code,
+        tag4Code,
+        tag5Code,
+        tag6Code,
+        medCatId,
+        distAlphaId,
+        distBetaId,
+        guardianId,
+        wardId,
+      ],
+    );
+
+    const adminToken = (
+      await request(app.getHttpServer())
+        .post("/v1/auth/login")
+        .send({ email: `${adminId}@example.test`, password: adminPassword })
+        .expect(201)
+    ).body.accessToken;
+
+    const distAlphaToken = (
+      await request(app.getHttpServer())
+        .post("/v1/auth/login")
+        .send({ email: `${distAlphaUserId}@example.test`, password: adminPassword })
+        .expect(201)
+    ).body.accessToken;
+
+    const guardianToken = (
+      await request(app.getHttpServer())
+        .post("/v1/auth/login")
+        .send({ email: `${guardianId}@example.test`, password })
+        .expect(201)
+    ).body.accessToken;
+
+    // 1. ADMIN INVENTORY VIEW: sees all 6 tags across all distributors + company stock
+    const adminRes = await request(app.getHttpServer())
+      .get("/v1/inventory/tags")
+      .set("Authorization", `Bearer ${adminToken}`)
+      .expect(200);
+
+    expect(adminRes.body.total).toBe(6);
+    expect(adminRes.body.items).toHaveLength(6);
+    expect(adminRes.body.counts).toEqual({
+      blank: 3,
+      assigned: 1,
+      active: 1,
+      lost: 1,
+      revoked: 0,
+      total: 6,
+    });
+
+    const adminCodes = adminRes.body.items.map((i: { code: string }) => i.code);
+    expect(adminCodes).toContain(tag1Code);
+    expect(adminCodes).toContain(tag2Code);
+    expect(adminCodes).toContain(tag3Code);
+    expect(adminCodes).toContain(tag4Code);
+    expect(adminCodes).toContain(tag5Code);
+    expect(adminCodes).toContain(tag6Code);
+
+    // Admin sees distributor name and unmasked/system assignment reference
+    const adminTag2 = adminRes.body.items.find((i: { code: string }) => i.code === tag2Code);
+    expect(adminTag2.distributorName).toBe("Distributor Alpha");
+
+    const adminTag4 = adminRes.body.items.find((i: { code: string }) => i.code === tag4Code);
+    expect(adminTag4.assignedReference).toBe(`WARD-${wardId.slice(0, 8)}`);
+
+    // 2. DISTRIBUTOR ALPHA INVENTORY VIEW: sees ONLY Alpha's held/originated stock (Tags 2, 4, 5)
+    const distRes = await request(app.getHttpServer())
+      .get("/v1/inventory/tags")
+      .set("Authorization", `Bearer ${distAlphaToken}`)
+      .expect(200);
+
+    expect(distRes.body.total).toBe(3);
+    expect(distRes.body.items).toHaveLength(3);
+    expect(distRes.body.counts).toEqual({
+      blank: 1,
+      assigned: 1,
+      active: 1,
+      lost: 0,
+      revoked: 0,
+      total: 3,
+    });
+
+    const distCodes = distRes.body.items.map((i: { code: string }) => i.code);
+    expect(distCodes).toContain(tag2Code);
+    expect(distCodes).toContain(tag4Code);
+    expect(distCodes).toContain(tag5Code);
+    expect(distCodes).not.toContain(tag1Code); // Company stock hidden
+    expect(distCodes).not.toContain(tag3Code); // Dist Beta stock hidden
+    expect(distCodes).not.toContain(tag6Code); // Dist Beta stock hidden
+
+    // PRIVACY ENFORCEMENT: Distributor sees MASKED reference only
+    const distTag4 = distRes.body.items.find((i: { code: string }) => i.code === tag4Code);
+    expect(distTag4.assignedReference).toBe(`REF-***-${wardId.slice(-4)}`);
+    expect(distTag4.assignedReference).not.toContain(wardId); // Full ward ID is never present
+
+    // PRIVACY ENFORCEMENT: Zero health, consent, or profile data leakage in any inventory response
+    for (const item of distRes.body.items) {
+      expect(item).not.toHaveProperty("wardName");
+      expect(item).not.toHaveProperty("guardianName");
+      expect(item).not.toHaveProperty("guardianEmail");
+      expect(item).not.toHaveProperty("bloodGroup");
+      expect(item).not.toHaveProperty("allergies");
+      expect(item).not.toHaveProperty("fields");
+      expect(item).not.toHaveProperty("consent");
+    }
+
+    // 3. FILTERING & SEARCH: Distributor filters by status = 'active'
+    const activeFilterRes = await request(app.getHttpServer())
+      .get("/v1/inventory/tags?status=active")
+      .set("Authorization", `Bearer ${distAlphaToken}`)
+      .expect(200);
+
+    expect(activeFilterRes.body.total).toBe(1);
+    expect(activeFilterRes.body.items[0].code).toBe(tag5Code);
+    // Count strip still represents the total status counts for the scoped inventory
+    expect(activeFilterRes.body.counts).toEqual({
+      blank: 1,
+      assigned: 1,
+      active: 1,
+      lost: 0,
+      revoked: 0,
+      total: 3,
+    });
+
+    // 4. ACCESS CONTROL: Guardian role is forbidden from inventory endpoint
+    await request(app.getHttpServer())
+      .get("/v1/inventory/tags")
+      .set("Authorization", `Bearer ${guardianToken}`)
+      .expect(403);
   });
 });

@@ -13,6 +13,7 @@ import { ScanResolverModule } from "./scan-resolver/scan-resolver.module";
 import { TagLifecycleModule } from "./tag-lifecycle/tag-lifecycle.module";
 import { TagCustodyModule } from "./tag-custody/tag-custody.module";
 import { TagAssignmentModule } from "./tag-assignment/tag-assignment.module";
+import { InventoryModule } from "./inventory/inventory.module";
 import { WardGuardiansModule } from "./ward-guardians/ward-guardians.module";
 
 @Module({
@@ -56,6 +57,7 @@ import { WardGuardiansModule } from "./ward-guardians/ward-guardians.module";
     TagLifecycleModule,
     TagCustodyModule,
     TagAssignmentModule,
+    InventoryModule,
     ScanResolverModule,
     ScanAuditModule,
     PrivacyNoticeModule,
