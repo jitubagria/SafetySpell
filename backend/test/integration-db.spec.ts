@@ -181,6 +181,7 @@ beforeAll(async () => {
     "013_short_public_tag_codes.sql",
     "014_tag_custody_authority.sql",
     "015_tag_activation_pin_and_claim.sql",
+    "016_database_role_hardening.sql",
   ]);
   const tables = await db.query(
     "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename",

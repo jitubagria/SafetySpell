@@ -152,6 +152,7 @@ describe("Phase 6 Slice 1: Shared Throttler & Trusted-Proxy IP Resolution", () =
     let brokenApp: INestApplication;
 
     beforeAll(async () => {
+      process.env.TEST_OUTAGE_STRICT = "1";
       // Create an app instance with a broken/unreachable Redis store
       const brokenRedisMock = {
         eval: () => Promise.reject(new Error("Connection to Redis lost (ECONNREFUSED)")),
@@ -171,6 +172,7 @@ describe("Phase 6 Slice 1: Shared Throttler & Trusted-Proxy IP Resolution", () =
     });
 
     afterAll(async () => {
+      delete process.env.TEST_OUTAGE_STRICT;
       if (brokenApp) await brokenApp.close();
     });
 

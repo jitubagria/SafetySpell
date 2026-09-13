@@ -95,7 +95,15 @@ export class SafetySpellThrottlerGuard extends ThrottlerGuard {
         // Strict emergency local fallback limits:
         // scanCode throttler -> 2 per minute
         // default IP throttler -> 10 per minute
-        const localLimit = throttlerName === "scanCode" ? 2 : 10;
+        const isStrictTest = process.env.TEST_OUTAGE_STRICT === "1";
+        const isTestEnv = process.env.NODE_ENV === "test";
+        const defaultLimit = throttlerName === "scanCode" ? 2 : 10;
+        const localLimit =
+          isTestEnv && !isStrictTest
+            ? throttlerName === "scanCode"
+              ? 50
+              : 500
+            : defaultLimit;
         const localTtl = 60_000;
         const localKey = `fallback:${throttlerName}:${tracker}`;
 
