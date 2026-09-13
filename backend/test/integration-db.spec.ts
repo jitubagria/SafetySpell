@@ -164,6 +164,7 @@ beforeAll(async () => {
     "005_allergy_public_free_text.sql",
     "006_remove_clinical_reviewer.sql",
     "007_blood_group_public_capable.sql",
+    "008_category_distributor_commercial_foundation.sql",
   ]);
   const tables = await db.query(
     "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename",
@@ -171,6 +172,10 @@ beforeAll(async () => {
   expect(tables.rows.map((row) => row.tablename)).toEqual(
     expect.arrayContaining([
       "consent_audit",
+      "categories",
+      "distributors",
+      "orders",
+      "price_books",
       "field_catalog",
       "scan_log",
       "tags",

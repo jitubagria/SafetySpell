@@ -11,7 +11,7 @@ import { ConfigService } from "@nestjs/config";
 import { Reflector } from "@nestjs/core";
 import * as jwt from "jsonwebtoken";
 
-export type ApiRole = "company_admin" | "guardian" | "staff";
+export type ApiRole = "company_admin" | "guardian" | "staff" | "distributor";
 export interface AuthenticatedUser {
   id: string;
   role: ApiRole;
