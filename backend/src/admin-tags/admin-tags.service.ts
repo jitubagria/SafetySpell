@@ -38,8 +38,8 @@ export class AdminTagsService {
         }
         const value = createPublicTagCode();
         const inserted = await client.query(
-          `INSERT INTO tags(code,batch_id,category,category_id,form,status,inventory_status)
-           VALUES($1,$2,$3,$4,$5,'manufactured','blank') ON CONFLICT DO NOTHING RETURNING code`,
+          `INSERT INTO tags(code,batch_id,category,category_id,form,status,inventory_status,holder_kind)
+           VALUES($1,$2,$3,$4,$5,'manufactured','blank','company') ON CONFLICT DO NOTHING RETURNING code`,
           [value, batch.rows[0]!.id, input.categoryKey, category.rows[0]!.id, input.form],
         );
         if (inserted.rowCount) codes.push(value);

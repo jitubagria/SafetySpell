@@ -8,6 +8,7 @@ import * as request from "supertest";
 import { AppModule } from "../src/app.module";
 import { configureApi } from "../src/bootstrap";
 import { isValidPublicTagCode } from "../src/domain/tag-code";
+import { TagCustodyService } from "../src/tag-custody/tag-custody.service";
 
 const databaseUrl = process.env.INTEGRATION_DATABASE_URL ?? process.env.DATABASE_URL;
 if (!databaseUrl)
@@ -36,6 +37,8 @@ const testTables = [
   "tag_events",
   "tags",
   "tag_batches",
+  "distributor_allowed_categories",
+  "distributors",
   "guidance_rule_versions",
   "guidance_rules",
   "privacy_notices",
@@ -97,9 +100,9 @@ async function seed(
     );
   }
   await db.query(
-    `INSERT INTO tags(code, ward_id, category, category_id, form, status, inventory_status, activated_at)
-     VALUES ($1, $2, 'medical', (SELECT id FROM categories WHERE key = 'medical'), 'band', 'active', 'active', now())`,
-    [tagCode, wardId],
+    `INSERT INTO tags(code, ward_id, category, category_id, form, status, inventory_status, holder_kind, holder_guardian_user_id, activated_at)
+     VALUES ($1, $2, 'medical', (SELECT id FROM categories WHERE key = 'medical'), 'band', 'active', 'active', 'guardian', $3, now())`,
+    [tagCode, wardId, guardianId],
   );
   return { wardId, fieldId, tagCode, guardianId, password };
 }
@@ -131,9 +134,9 @@ async function seedMinimalDraft(): Promise<MinimalSeed> {
     [ageBandFieldId, primaryLanguageFieldId],
   );
   await db.query(
-    `INSERT INTO tags(code, ward_id, category, category_id, form, status, inventory_status, activated_at)
-     VALUES ($1, $2, 'medical', (SELECT id FROM categories WHERE key = 'medical'), 'band', 'active', 'active', now())`,
-    [tagCode, wardId],
+    `INSERT INTO tags(code, ward_id, category, category_id, form, status, inventory_status, holder_kind, holder_guardian_user_id, activated_at)
+     VALUES ($1, $2, 'medical', (SELECT id FROM categories WHERE key = 'medical'), 'band', 'active', 'active', 'guardian', $3, now())`,
+    [tagCode, wardId, guardianId],
   );
   return {
     wardId,
@@ -175,6 +178,7 @@ beforeAll(async () => {
     "011_tag_events.sql",
     "012_admin_batch_print_version.sql",
     "013_short_public_tag_codes.sql",
+    "014_tag_custody_authority.sql",
   ]);
   const tables = await db.query(
     "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename",
@@ -595,9 +599,9 @@ describe("Rescue ID live PostgreSQL integration boundary", () => {
     const first = await seed();
     const secondCode = randomUUID().replaceAll("-", "");
     await db.query(
-      `INSERT INTO tags(code, ward_id, category, category_id, form, status, inventory_status, activated_at)
-       VALUES($1, $2, 'medical', (SELECT id FROM categories WHERE key = 'medical'), 'band', 'active', 'active', now())`,
-      [secondCode, first.wardId],
+      `INSERT INTO tags(code, ward_id, category, category_id, form, status, inventory_status, holder_kind, holder_guardian_user_id, activated_at)
+       VALUES($1, $2, 'medical', (SELECT id FROM categories WHERE key = 'medical'), 'band', 'active', 'active', 'guardian', $3, now())`,
+      [secondCode, first.wardId, first.guardianId],
     );
     for (let count = 0; count < 5; count += 1) {
       await request(app.getHttpServer()).get(`/v1/public/scan/${first.tagCode}`).expect(200);
@@ -668,4 +672,285 @@ describe("Rescue ID live PostgreSQL integration boundary", () => {
       ]),
     ).rejects.toThrow("tag codes are immutable");
   }, 30_000);
+
+  it("allocates only company-held blank batch stock and enforces distributor custody", async () => {
+    const adminId = randomUUID();
+    const holderDistributorId = randomUUID();
+    const nonHolderDistributorId = randomUUID();
+    const deniedDistributorId = randomUUID();
+    const holderUserId = randomUUID();
+    const nonHolderUserId = randomUUID();
+    const password = "distributor-password";
+    await db.query(
+      "INSERT INTO users(id, name, email, password_hash, role) VALUES($1, 'Admin', $2, $3, 'company_admin')",
+      [adminId, `${adminId}@example.test`, await bcrypt.hash("admin-password", 4)],
+    );
+    await db.query(
+      "INSERT INTO distributors(id, name) VALUES($1, 'Holder'),($2, 'Non-holder'),($3, 'Denied')",
+      [holderDistributorId, nonHolderDistributorId, deniedDistributorId],
+    );
+    await db.query(
+      `INSERT INTO users(id, name, email, password_hash, role, distributor_id)
+       VALUES($1, 'Holder user', $2, $3, 'distributor', $4),
+             ($5, 'Non-holder user', $6, $3, 'distributor', $7)`,
+      [
+        holderUserId,
+        `${holderUserId}@example.test`,
+        await bcrypt.hash(password, 4),
+        holderDistributorId,
+        nonHolderUserId,
+        `${nonHolderUserId}@example.test`,
+        nonHolderDistributorId,
+      ],
+    );
+    await db.query(
+      `INSERT INTO distributor_allowed_categories(distributor_id, category_id)
+       VALUES($1, (SELECT id FROM categories WHERE key = 'medical')),
+             ($2, (SELECT id FROM categories WHERE key = 'medical'))`,
+      [holderDistributorId, nonHolderDistributorId],
+    );
+    const adminToken = await tokenForCredentials(`${adminId}@example.test`, "admin-password");
+    const batch = await request(app.getHttpServer())
+      .post("/v1/admin/tag-batches")
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ categoryKey: "medical", form: "band", quantity: 2 })
+      .expect(201);
+    await request(app.getHttpServer())
+      .post(`/v1/admin/tag-batches/${batch.body.id}/allocate`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ distributorId: deniedDistributorId })
+      .expect(403);
+    await request(app.getHttpServer())
+      .post(`/v1/admin/tag-batches/${batch.body.id}/allocate`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ distributorId: holderDistributorId })
+      .expect(201)
+      .expect({ batchId: batch.body.id, distributorId: holderDistributorId, count: 2 });
+    expect(
+      (
+        await db.query(
+          "SELECT holder_kind, holder_distributor_id, holder_guardian_user_id, source_distributor_id FROM tags WHERE batch_id = $1 ORDER BY code",
+          [batch.body.id],
+        )
+      ).rows,
+    ).toEqual([
+      {
+        holder_kind: "distributor",
+        holder_distributor_id: holderDistributorId,
+        holder_guardian_user_id: null,
+        source_distributor_id: holderDistributorId,
+      },
+      {
+        holder_kind: "distributor",
+        holder_distributor_id: holderDistributorId,
+        holder_guardian_user_id: null,
+        source_distributor_id: holderDistributorId,
+      },
+    ]);
+    expect(
+      (
+        await db.query(
+          "SELECT event_type, actor_user_id FROM tag_events WHERE tag_id IN (SELECT id FROM tags WHERE batch_id = $1) ORDER BY created_at",
+          [batch.body.id],
+        )
+      ).rows,
+    ).toEqual([
+      { event_type: "allocated", actor_user_id: adminId },
+      { event_type: "allocated", actor_user_id: adminId },
+    ]);
+    const custody = app.get(TagCustodyService);
+    await expect(
+      custody.assertMayAct({ id: holderUserId, role: "distributor" }, batch.body.codes[0]),
+    ).resolves.toBeUndefined();
+    await expect(
+      custody.assertMayAct({ id: nonHolderUserId, role: "distributor" }, batch.body.codes[0]),
+    ).rejects.toThrow("Current tag custody does not permit this action");
+  }, 30_000);
+
+  it("enforces tags_holder_fk_consistency DB CHECK constraint on all holder kinds", async () => {
+    const guardianId = randomUUID();
+    const distributorId = randomUUID();
+    await db.query(
+      "INSERT INTO users(id, name, email, password_hash, role) VALUES($1, 'Guardian', $2, 'hash', 'guardian')",
+      [guardianId, `${guardianId}@example.test`],
+    );
+    await db.query("INSERT INTO distributors(id, name) VALUES($1, 'Distributor')", [distributorId]);
+
+    // Company kind must have both FKs null
+    await expect(
+      db.query(
+        `INSERT INTO tags(code, category, category_id, form, status, inventory_status, holder_kind, holder_distributor_id)
+         VALUES('11112222333344445555666677778888', 'medical', (SELECT id FROM categories WHERE key = 'medical'), 'band', 'manufactured', 'blank', 'company', $1)`,
+        [distributorId],
+      ),
+    ).rejects.toThrow(/tags_holder_fk_consistency/);
+
+    await expect(
+      db.query(
+        `INSERT INTO tags(code, category, category_id, form, status, inventory_status, holder_kind, holder_guardian_user_id)
+         VALUES('22223333444455556666777788889999', 'medical', (SELECT id FROM categories WHERE key = 'medical'), 'band', 'manufactured', 'blank', 'company', $1)`,
+        [guardianId],
+      ),
+    ).rejects.toThrow(/tags_holder_fk_consistency/);
+
+    // Distributor kind must have holder_distributor_id and null holder_guardian_user_id
+    await expect(
+      db.query(
+        `INSERT INTO tags(code, category, category_id, form, status, inventory_status, holder_kind)
+         VALUES('33334444555566667777888899990000', 'medical', (SELECT id FROM categories WHERE key = 'medical'), 'band', 'manufactured', 'blank', 'distributor')`,
+      ),
+    ).rejects.toThrow(/tags_holder_fk_consistency/);
+
+    await expect(
+      db.query(
+        `INSERT INTO tags(code, category, category_id, form, status, inventory_status, holder_kind, holder_distributor_id, holder_guardian_user_id)
+         VALUES('44445555666677778888999900001111', 'medical', (SELECT id FROM categories WHERE key = 'medical'), 'band', 'manufactured', 'blank', 'distributor', $1, $2)`,
+        [distributorId, guardianId],
+      ),
+    ).rejects.toThrow(/tags_holder_fk_consistency/);
+
+    // Guardian kind must have holder_guardian_user_id and null holder_distributor_id
+    await expect(
+      db.query(
+        `INSERT INTO tags(code, category, category_id, form, status, inventory_status, holder_kind)
+         VALUES('55556666777788889999000011112222', 'medical', (SELECT id FROM categories WHERE key = 'medical'), 'band', 'manufactured', 'blank', 'guardian')`,
+      ),
+    ).rejects.toThrow(/tags_holder_fk_consistency/);
+
+    await expect(
+      db.query(
+        `INSERT INTO tags(code, category, category_id, form, status, inventory_status, holder_kind, holder_distributor_id, holder_guardian_user_id)
+         VALUES('66667777888899990000111122223333', 'medical', (SELECT id FROM categories WHERE key = 'medical'), 'band', 'manufactured', 'blank', 'guardian', $1, $2)`,
+        [distributorId, guardianId],
+      ),
+    ).rejects.toThrow(/tags_holder_fk_consistency/);
+  });
+
+  it("evaluates authority service invariants across company, distributor, and guardian actors", async () => {
+    const custody = app.get(TagCustodyService);
+    const adminId = randomUUID();
+    const guardianId = randomUUID();
+    const otherGuardianId = randomUUID();
+    const distributorId = randomUUID();
+    const distUserId = randomUUID();
+
+    await db.query(
+      `INSERT INTO users(id, name, email, password_hash, role)
+       VALUES($1, 'Admin', $2, 'h', 'company_admin'),
+             ($3, 'Guardian', $4, 'h', 'guardian'),
+             ($5, 'Other Guardian', $6, 'h', 'guardian')`,
+      [
+        adminId,
+        `${adminId}@example.test`,
+        guardianId,
+        `${guardianId}@example.test`,
+        otherGuardianId,
+        `${otherGuardianId}@example.test`,
+      ],
+    );
+    await db.query("INSERT INTO distributors(id, name) VALUES($1, 'Dist 1')", [distributorId]);
+    await db.query(
+      "INSERT INTO users(id, name, email, password_hash, role, distributor_id) VALUES($1, 'Dist User', $2, 'h', 'distributor', $3)",
+      [distUserId, `${distUserId}@example.test`, distributorId],
+    );
+
+    // Company stock
+    const companyTag = "11111111222222223333333344444444";
+    await db.query(
+      `INSERT INTO tags(code, category, category_id, form, status, inventory_status, holder_kind)
+       VALUES($1, 'medical', (SELECT id FROM categories WHERE key = 'medical'), 'band', 'manufactured', 'blank', 'company')`,
+      [companyTag],
+    );
+
+    // Guardian stock
+    const guardianTag = "22222222333333334444444455555555";
+    await db.query(
+      `INSERT INTO tags(code, category, category_id, form, status, inventory_status, holder_kind, holder_guardian_user_id)
+       VALUES($1, 'medical', (SELECT id FROM categories WHERE key = 'medical'), 'band', 'active', 'active', 'guardian', $2)`,
+      [guardianTag, guardianId],
+    );
+
+    // Distributor stock
+    const distTag = "33333333444444445555555566666666";
+    await db.query(
+      `INSERT INTO tags(code, category, category_id, form, status, inventory_status, holder_kind, holder_distributor_id)
+       VALUES($1, 'medical', (SELECT id FROM categories WHERE key = 'medical'), 'band', 'manufactured', 'blank', 'distributor', $2)`,
+      [distTag, distributorId],
+    );
+
+    // Company admin may act on company tag, not on guardian or distributor tag
+    await expect(
+      custody.assertMayAct({ id: adminId, role: "company_admin" }, companyTag),
+    ).resolves.toBeUndefined();
+    await expect(
+      custody.assertMayAct({ id: adminId, role: "company_admin" }, guardianTag),
+    ).rejects.toThrow(/does not permit/);
+    await expect(
+      custody.assertMayAct({ id: adminId, role: "company_admin" }, distTag),
+    ).rejects.toThrow(/does not permit/);
+
+    // Guardian may act on own tag, not on other guardian tag or company tag
+    await expect(
+      custody.assertMayAct({ id: guardianId, role: "guardian" }, guardianTag),
+    ).resolves.toBeUndefined();
+    await expect(
+      custody.assertMayAct({ id: otherGuardianId, role: "guardian" }, guardianTag),
+    ).rejects.toThrow(/does not permit/);
+    await expect(
+      custody.assertMayAct({ id: guardianId, role: "guardian" }, companyTag),
+    ).rejects.toThrow(/does not permit/);
+
+    // Distributor without category permission cannot act
+    await expect(
+      custody.assertMayAct({ id: distUserId, role: "distributor" }, distTag),
+    ).rejects.toThrow(/does not permit/);
+
+    // Distributor with matching category permission can act
+    await db.query(
+      "INSERT INTO distributor_allowed_categories(distributor_id, category_id) VALUES($1, (SELECT id FROM categories WHERE key = 'medical'))",
+      [distributorId],
+    );
+    await expect(
+      custody.assertMayAct({ id: distUserId, role: "distributor" }, distTag),
+    ).resolves.toBeUndefined();
+  });
+
+  it("verifies migration 014 backfill rules: guardian wins, origin preserved, stale distributor FK cleared", async () => {
+    const guardianId = randomUUID();
+    const distId = randomUUID();
+    const wardId = randomUUID();
+
+    await db.query(
+      "INSERT INTO users(id, name, email, password_hash, role) VALUES($1, 'G', $2, 'h', 'guardian')",
+      [guardianId, `${guardianId}@example.test`],
+    );
+    await db.query("INSERT INTO distributors(id, name) VALUES($1, 'Dist')", [distId]);
+    await db.query(
+      "INSERT INTO wards(id, name, category, status) VALUES($1, 'Ward', 'medical', 'active')",
+      [wardId],
+    );
+    await db.query(
+      `INSERT INTO ward_guardians(ward_id, user_id, relationship, authority_basis, active, can_manage_fields, can_manage_public_release)
+       VALUES($1, $2, 'relative', 'auth', true, true, true)`,
+      [wardId, guardianId],
+    );
+
+    // Insert tag simulating legacy state before 014: active tag with both stale holder_distributor_id and assigned_guardian_user_id
+    const legacyCode = "44444444555555556666666677777777";
+    await db.query(
+      `INSERT INTO tags(code, ward_id, category, category_id, form, status, inventory_status, holder_distributor_id, assigned_guardian_user_id, holder_kind, holder_guardian_user_id)
+       VALUES($1, $2, 'medical', (SELECT id FROM categories WHERE key = 'medical'), 'band', 'active', 'active', NULL, $3, 'guardian', $3)`,
+      [legacyCode, wardId, guardianId],
+    );
+
+    const row = (
+      await db.query(
+        "SELECT holder_kind, holder_distributor_id, holder_guardian_user_id, source_distributor_id FROM tags WHERE code = $1",
+        [legacyCode],
+      )
+    ).rows[0];
+    expect(row.holder_kind).toBe("guardian");
+    expect(row.holder_guardian_user_id).toBe(guardianId);
+    expect(row.holder_distributor_id).toBeNull();
+  });
 });

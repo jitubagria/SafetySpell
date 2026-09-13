@@ -33,3 +33,4 @@ dist-ssr
 
 # Local Claude Code preview config
 .claude/
+output/
