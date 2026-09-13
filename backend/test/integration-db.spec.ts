@@ -1195,4 +1195,219 @@ describe("Rescue ID live PostgreSQL integration boundary", () => {
       .expect(400);
     expect(reClaimRes.body.message).toBe("Invalid tag code or activation PIN");
   });
+
+  it("enforces guardian activation safety gates: requires ward profile data and public consent before assigned tag becomes active", async () => {
+    const adminId = randomUUID();
+    const guardianId = randomUUID();
+    const outsiderId = randomUUID();
+    const wardId = randomUUID();
+    const password = "test-password";
+    const adminPassword = "admin-password";
+
+    await db.query(
+      "INSERT INTO users(id, name, email, password_hash, role) VALUES($1, 'Admin', $2, $3, 'company_admin')",
+      [adminId, `${adminId}@example.test`, await bcrypt.hash(adminPassword, 4)],
+    );
+    await db.query(
+      `INSERT INTO users(id, name, email, password_hash, role)
+       VALUES($1, 'Guardian', $2, $4, 'guardian'),
+             ($3, 'Outsider', $5, $4, 'guardian')`,
+      [
+        guardianId,
+        `${guardianId}@example.test`,
+        outsiderId,
+        await bcrypt.hash(password, 4),
+        `${outsiderId}@example.test`,
+      ],
+    );
+    await db.query(
+      "INSERT INTO wards(id, name, category, status) VALUES($1, 'Ward Alpha', 'medical', 'active')",
+      [wardId],
+    );
+    await db.query(
+      `INSERT INTO ward_guardians(ward_id, user_id, relationship, authority_basis, can_manage_fields, can_manage_public_release, active)
+       VALUES($1, $2, 'mother', 'court_order', true, true, true)`,
+      [wardId, guardianId],
+    );
+
+    const adminToken = (
+      await request(app.getHttpServer())
+        .post("/v1/auth/login")
+        .send({ email: `${adminId}@example.test`, password: adminPassword })
+        .expect(201)
+    ).body.accessToken;
+
+    const guardianToken = (
+      await request(app.getHttpServer())
+        .post("/v1/auth/login")
+        .send({ email: `${guardianId}@example.test`, password })
+        .expect(201)
+    ).body.accessToken;
+
+    const outsiderToken = (
+      await request(app.getHttpServer())
+        .post("/v1/auth/login")
+        .send({ email: `${outsiderId}@example.test`, password })
+        .expect(201)
+    ).body.accessToken;
+
+    // 1. Admin creates a tag batch
+    const batchRes = await request(app.getHttpServer())
+      .post("/v1/admin/tag-batches")
+      .set("Authorization", `Bearer ${adminToken}`)
+      .send({ categoryKey: "medical", form: "card", quantity: 1 })
+      .expect(201);
+    const tagItem = batchRes.body.tags[0];
+
+    // 2. Guardian claims tag -> status is 'assigned'
+    await request(app.getHttpServer())
+      .post(`/v1/app/wards/${wardId}/tags/claim`)
+      .set("Authorization", `Bearer ${guardianToken}`)
+      .send({ tagCode: tagItem.code, pin: tagItem.pin })
+      .expect(201);
+
+    // Verify tag is 'assigned' and public scan returns tag_unavailable
+    const scanResolver = app.get(ScanResolverService);
+    let publicScan = await scanResolver.resolve(tagItem.code);
+    expect(publicScan).toEqual({ status: "tag_unavailable" });
+
+    // GATE 1: Attempt to activate tag when ward profile has NO data -> rejected
+    const noDataRes = await request(app.getHttpServer())
+      .post(`/v1/app/wards/${wardId}/tags/${tagItem.code}/activate`)
+      .set("Authorization", `Bearer ${guardianToken}`)
+      .expect(400);
+    expect(noDataRes.body.message).toContain("ward profile has no data");
+
+    // Insert catalog fields for medical category (blood_group and allergy)
+    const bloodGroupId = randomUUID();
+    const allergyId = randomUUID();
+    await db.query(
+      `INSERT INTO field_catalog(id, category, field_key, label, data_type, max_level, public_eligible, approved, provenance_required, guardian_editable, validation_policy)
+       VALUES
+         ($1, 'medical', 'blood_group', 'Blood Group', 'enum', 'public', true, true, true, true, '{"allowed_values":["A+","A-","B+","B-","O+","O-","AB+","AB-","Unknown"]}'::jsonb),
+         ($2, 'medical', 'allergy', 'Allergies', 'text', 'public', true, true, true, true, '{"max_length":1000}'::jsonb)`,
+      [bloodGroupId, allergyId],
+    );
+
+    // Guardian fills ward data (blood_group and allergy)
+    await request(app.getHttpServer())
+      .patch(`/v1/app/wards/${wardId}/fields/${bloodGroupId}`)
+      .set("Authorization", `Bearer ${guardianToken}`)
+      .send({ value: "O+" })
+      .expect(200);
+
+    await request(app.getHttpServer())
+      .patch(`/v1/app/wards/${wardId}/fields/${allergyId}`)
+      .set("Authorization", `Bearer ${guardianToken}`)
+      .send({ value: "Penicillin\nPeanuts" })
+      .expect(200);
+
+    // GATE 2: Attempt to activate tag when fields are filled but NO public consent is given -> rejected
+    const noConsentRes = await request(app.getHttpServer())
+      .post(`/v1/app/wards/${wardId}/tags/${tagItem.code}/activate`)
+      .set("Authorization", `Bearer ${guardianToken}`)
+      .expect(400);
+    expect(noConsentRes.body.message).toContain("no fields have been released for public scan");
+
+    // GATE 3: Outsider guardian attempts to activate tag -> rejected
+    await request(app.getHttpServer())
+      .post(`/v1/app/wards/${wardId}/tags/${tagItem.code}/activate`)
+      .set("Authorization", `Bearer ${outsiderToken}`)
+      .expect(403);
+
+    // Guardian releases blood_group and allergy to public
+    await request(app.getHttpServer())
+      .put(`/v1/app/wards/${wardId}/fields/${bloodGroupId}/visibility`)
+      .set("Authorization", `Bearer ${guardianToken}`)
+      .send({ visibility: "public" })
+      .expect(200);
+
+    await request(app.getHttpServer())
+      .put(`/v1/app/wards/${wardId}/fields/${allergyId}/visibility`)
+      .set("Authorization", `Bearer ${guardianToken}`)
+      .send({ visibility: "public" })
+      .expect(200);
+
+    // SUCCESS GATE: Now guardian activates the tag!
+    const activateRes = await request(app.getHttpServer())
+      .post(`/v1/app/wards/${wardId}/tags/${tagItem.code}/activate`)
+      .set("Authorization", `Bearer ${guardianToken}`)
+      .expect(201);
+
+    expect(activateRes.body).toMatchObject({
+      success: true,
+      code: tagItem.code,
+      status: "active",
+    });
+    expect(activateRes.body.activatedAt).toBeDefined();
+
+    // Verify DB state: inventory_status = 'active', status = 'active', activated_at NOT NULL
+    const activeTagDb = (
+      await db.query(
+        "SELECT inventory_status, status, holder_kind, holder_guardian_user_id, ward_id, activated_at FROM tags WHERE code = $1",
+        [tagItem.code],
+      )
+    ).rows[0];
+    expect(activeTagDb.inventory_status).toBe("active");
+    expect(activeTagDb.status).toBe("active");
+    expect(activeTagDb.activated_at).toBeDefined();
+
+    // Verify tag_events has immutable 'activated' event
+    const events = (
+      await db.query(
+        "SELECT event_type, from_status, to_status, actor_user_id, metadata FROM tag_events WHERE tag_id = (SELECT id FROM tags WHERE code = $1) ORDER BY created_at",
+        [tagItem.code],
+      )
+    ).rows;
+    expect(events).toEqual([
+      {
+        event_type: "assigned",
+        from_status: "blank",
+        to_status: "assigned",
+        actor_user_id: guardianId,
+        metadata: { ward_id: wardId, method: "pin_claim" },
+      },
+      {
+        event_type: "activated",
+        from_status: "assigned",
+        to_status: "active",
+        actor_user_id: guardianId,
+        metadata: { ward_id: wardId, method: "guardian_release" },
+      },
+    ]);
+
+    // Verify public scan NOW resolves and returns exactly the released, filtered fields!
+    publicScan = await scanResolver.resolve(tagItem.code);
+    expect(publicScan.status).toBe("available");
+    expect(publicScan.category).toBe("medical");
+    expect(publicScan.fields).toEqual([
+      {
+        key: "blood_group",
+        label: "Blood Group",
+        value: "O+",
+        provenance: "guardian_reported",
+      },
+      {
+        key: "allergy",
+        label: "Allergies",
+        value: "Penicillin\nPeanuts",
+        provenance: "guardian_reported",
+      },
+    ]);
+    expect(publicScan.disclaimer).toBe(
+      "Information is family-provided. This is not medical advice.",
+    );
+
+    // Verify guardian tags list now surfaces the active tag
+    const guardianTagsRes = await request(app.getHttpServer())
+      .get(`/v1/app/wards/${wardId}/tags`)
+      .set("Authorization", `Bearer ${guardianToken}`)
+      .expect(200);
+    expect(guardianTagsRes.body).toEqual([
+      {
+        code: tagItem.code,
+        form: "card",
+      },
+    ]);
+  });
 });

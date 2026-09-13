@@ -133,6 +133,31 @@ export function setVisibility(
   );
 }
 
+export function claimTag(
+  token: string,
+  wardId: string,
+  tagCode: string,
+  pin: string,
+): Promise<{ success: boolean; code: string; wardId: string }> {
+  return call(
+    `/v1/app/wards/${wardId}/tags/claim`,
+    { method: "POST", body: JSON.stringify({ tagCode, pin }) },
+    token,
+  );
+}
+
+export function activateTag(
+  token: string,
+  wardId: string,
+  tagCode: string,
+): Promise<{ success: boolean; code: string; status: "active"; activatedAt: string }> {
+  return call(
+    `/v1/app/wards/${wardId}/tags/${encodeURIComponent(tagCode)}/activate`,
+    { method: "POST" },
+    token,
+  );
+}
+
 export function scanTag(tagCode: string): Promise<ApiScanResponse> {
   return call<ApiScanResponse>(`/v1/public/scan/${encodeURIComponent(tagCode)}`);
 }

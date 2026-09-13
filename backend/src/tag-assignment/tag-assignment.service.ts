@@ -154,4 +154,160 @@ export class TagAssignmentService {
       };
     });
   }
+
+  async activateTag(
+    actor: AuthenticatedUser,
+    wardId: string,
+    rawTagCode: string,
+  ): Promise<{ success: true; code: string; status: "active"; activatedAt: Date }> {
+    const normalizedCode = normalizeTagCode(rawTagCode);
+
+    // 1. Verify guardian permissions over ward
+    const wardAuth = await this.db.query<{
+      id: string;
+      can_manage_fields: boolean;
+      can_manage_public_release: boolean;
+    }>(
+      `SELECT w.id, g.can_manage_fields, g.can_manage_public_release
+       FROM wards w
+       JOIN ward_guardians g ON g.ward_id = w.id AND g.user_id = $1 AND g.active = true
+       WHERE w.id = $2 AND w.status = 'active'`,
+      [actor.id, wardId],
+    );
+    const authRow = wardAuth.rows[0];
+    if (!authRow) {
+      throw new ForbiddenException("Guardian is not authorised for this ward");
+    }
+    if (!authRow.can_manage_public_release) {
+      throw new ForbiddenException("Guardian lacks public-release authority for this ward");
+    }
+
+    // 2. Enforce safety gate: ward MUST have profile data present
+    const dataCountResult = await this.db.query<{ count: string }>(
+      `SELECT count(*)::text as count
+       FROM ward_field_values
+       WHERE ward_id = $1 AND value IS NOT NULL AND value::text NOT IN ('null', '""', '{}')`,
+      [wardId],
+    );
+    const hasData = parseInt(dataCountResult.rows[0]?.count ?? "0", 10) > 0;
+    if (!hasData) {
+      throw new BadRequestException(
+        "Cannot activate tag: ward profile has no data. Fill ward data before activation.",
+      );
+    }
+
+    // 3. Enforce safety gate: ward MUST have at least one field released for public scan
+    const publicReleaseCountResult = await this.db.query<{ count: string }>(
+      `SELECT count(*)::text as count
+       FROM ward_field_visibility v
+       JOIN field_catalog f ON f.id = v.field_catalog_id
+       WHERE v.ward_id = $1
+         AND v.visibility = 'public'
+         AND f.approved = true
+         AND f.public_eligible = true
+         AND f.max_level = 'public'`,
+      [wardId],
+    );
+    const hasPublicRelease = parseInt(publicReleaseCountResult.rows[0]?.count ?? "0", 10) > 0;
+    if (!hasPublicRelease) {
+      throw new BadRequestException(
+        "Cannot activate tag: no fields have been released for public scan. Set at least one field to public before activation.",
+      );
+    }
+
+    // 4. Verify tag exists and is currently in 'assigned' state for this ward and guardian
+    const tagResult = await this.db.query<{
+      id: string;
+      code: string;
+      inventory_status: string;
+      status: string;
+      holder_kind: string;
+      holder_guardian_user_id: string | null;
+      ward_id: string | null;
+      activated_at: Date | null;
+    }>(
+      `SELECT id, code, inventory_status, status, holder_kind, holder_guardian_user_id, ward_id, activated_at
+       FROM tags
+       WHERE upper(code) = upper($1)`,
+      [normalizedCode],
+    );
+    const tag = tagResult.rows[0];
+    if (!tag) {
+      throw new NotFoundException("Tag not found");
+    }
+    if (
+      tag.ward_id !== wardId ||
+      tag.holder_kind !== "guardian" ||
+      tag.holder_guardian_user_id !== actor.id
+    ) {
+      throw new ForbiddenException("Guardian does not hold custody of this tag for this ward");
+    }
+
+    // Idempotent if already active
+    if (tag.inventory_status === "active" && tag.status === "active") {
+      return {
+        success: true,
+        code: tag.code,
+        status: "active",
+        activatedAt: tag.activated_at ?? new Date(),
+      };
+    }
+
+    if (tag.inventory_status !== "assigned") {
+      throw new BadRequestException(`Tag cannot be activated from status ${tag.inventory_status}`);
+    }
+
+    // 5. Execute atomic activation transaction
+    return this.db.transaction(async (client) => {
+      const locked = await client.query<{
+        id: string;
+        inventory_status: string;
+        status: string;
+        activated_at: Date | null;
+      }>(`SELECT id, inventory_status, status, activated_at FROM tags WHERE id = $1 FOR UPDATE`, [
+        tag.id,
+      ]);
+      const currentLocked = locked.rows[0];
+      if (currentLocked?.inventory_status === "active") {
+        return {
+          success: true,
+          code: tag.code,
+          status: "active",
+          activatedAt: currentLocked.activated_at ?? new Date(),
+        };
+      }
+      if (currentLocked?.inventory_status !== "assigned") {
+        throw new BadRequestException(
+          `Tag cannot be activated from status ${currentLocked?.inventory_status}`,
+        );
+      }
+
+      const updateRes = await client.query<{ activated_at: Date }>(
+        `UPDATE tags
+         SET inventory_status = 'active',
+             status = 'active',
+             activated_at = COALESCE(activated_at, now()),
+             status_changed_at = now()
+         WHERE id = $1
+         RETURNING activated_at`,
+        [tag.id],
+      );
+
+      const activatedAt = updateRes.rows[0]?.activated_at ?? new Date();
+
+      // Append immutable 'activated' event to tag_events
+      await client.query(
+        `INSERT INTO tag_events(tag_id, event_type, actor_user_id, from_status, to_status, metadata)
+         VALUES($1, 'activated', $2, 'assigned', 'active', jsonb_build_object('ward_id', $3::text, 'method', 'guardian_release'))`,
+        [tag.id, actor.id, wardId],
+      );
+
+      return {
+        success: true,
+        code: tag.code,
+        status: "active",
+        activatedAt,
+      };
+    });
+  }
 }

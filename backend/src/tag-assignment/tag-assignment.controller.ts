@@ -19,6 +19,12 @@ class ClaimTagDto {
   pin!: string;
 }
 
+class ActivateTagDto {
+  @IsString()
+  @IsNotEmpty()
+  tagCode!: string;
+}
+
 @Controller("v1/app/wards/:wardId/tags")
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Roles("guardian")
@@ -32,5 +38,23 @@ export class TagAssignmentController {
     @Body() body: ClaimTagDto,
   ) {
     return this.assignmentService.claimTag(user, wardId, body.tagCode, body.pin);
+  }
+
+  @Post(":tagCode/activate")
+  activateByParam(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("wardId") wardId: string,
+    @Param("tagCode") tagCode: string,
+  ) {
+    return this.assignmentService.activateTag(user, wardId, tagCode);
+  }
+
+  @Post("activate")
+  activateByBody(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("wardId") wardId: string,
+    @Body() body: ActivateTagDto,
+  ) {
+    return this.assignmentService.activateTag(user, wardId, body.tagCode);
   }
 }
