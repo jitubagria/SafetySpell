@@ -18,16 +18,9 @@ export interface PublicProjection {
   fields: PublicField[];
   policyVersion: number;
 }
-export interface PublishedGuidance {
-  ruleId: string;
-  version: number;
-  do: string[];
-  dont: string[];
-}
 export interface PublicScanResponse {
   status: "available" | "tag_unavailable";
   category?: string;
   fields?: Array<Pick<PublicField, "key" | "label" | "value" | "provenance">>;
-  guidance?: PublishedGuidance[];
   disclaimer?: string;
 }

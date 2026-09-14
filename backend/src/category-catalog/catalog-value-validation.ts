@@ -1,9 +1,25 @@
 import { BadRequestException } from "@nestjs/common";
 
 export type FieldDataType = "text" | "short_text" | "boolean" | "enum";
+export const CONDITION_FLAG_KEYS = [
+  "epilepsy",
+  "cardiac",
+  "diabetes",
+  "blood_thinner",
+  "dialysis",
+  "pacemaker_implant",
+  "severe_allergy",
+  "asthma_copd",
+  "non_verbal",
+  "hearing_impaired",
+  "vision_impaired",
+  "wandering",
+] as const;
+const CONDITION_FLAG_KEY_SET = new Set<string>(CONDITION_FLAG_KEYS);
 export interface CatalogValidationPolicy {
   max_length?: number;
   allowed_values?: unknown[];
+  multi_select?: boolean;
 }
 
 function isPolicy(value: unknown): value is CatalogValidationPolicy {
@@ -25,6 +41,10 @@ function boundedTextMaxLength(policy: unknown): number | undefined {
   const max = isPolicy(policy) ? policy.max_length : undefined;
   if (typeof max !== "number" || !Number.isInteger(max) || max < 1 || max > 1000) return undefined;
   return max;
+}
+
+function isMultiSelectEnum(policy: unknown): boolean {
+  return isPolicy(policy) && policy.multi_select === true;
 }
 
 export function hasControlledPublicPolicy(dataType: string, policy: unknown): boolean {
@@ -65,7 +85,24 @@ export function sanitizeCatalogValue(dataType: string, policy: unknown, value: u
   return sanitizeFreeText(value, boundedTextMaxLength(policy) ?? 1000);
 }
 
-export function validateCatalogValue(dataType: string, policy: unknown, value: unknown): void {
+function hasExactConditionFlagPolicy(dataType: string, policy: unknown): boolean {
+  const allowed = allowedValues(policy);
+  return (
+    dataType === "enum" &&
+    isMultiSelectEnum(policy) &&
+    Boolean(allowed) &&
+    allowed!.length === CONDITION_FLAG_KEYS.length &&
+    allowed!.every((key) => typeof key === "string" && CONDITION_FLAG_KEY_SET.has(key)) &&
+    new Set(allowed!).size === CONDITION_FLAG_KEYS.length
+  );
+}
+
+export function validateCatalogValue(
+  dataType: string,
+  policy: unknown,
+  value: unknown,
+  fieldKey?: string,
+): void {
   if (dataType === "text" || dataType === "short_text") {
     const maxLength = isPolicy(policy) ? policy.max_length : undefined;
     if (
@@ -85,11 +122,35 @@ export function validateCatalogValue(dataType: string, policy: unknown, value: u
   if (dataType === "boolean" && typeof value !== "boolean") {
     throw new BadRequestException("Value must be a boolean");
   }
+  const allowed = allowedValues(policy);
+  if (!allowed) {
+    throw new BadRequestException("Value is not allowed by the catalog policy");
+  }
+  if (fieldKey === "condition_flags" && !hasExactConditionFlagPolicy(dataType, policy)) {
+    throw new BadRequestException("Condition flags catalog policy is invalid");
+  }
+  if (dataType === "enum" && isMultiSelectEnum(policy)) {
+    if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
+      throw new BadRequestException("Multi-select enum values must be string arrays");
+    }
+    if (new Set(value).size !== value.length) {
+      throw new BadRequestException("Multi-select enum values must not repeat keys");
+    }
+    if (
+      !value.every(
+        (entry) =>
+          allowed.some((candidate) => Object.is(candidate, entry)) &&
+          (fieldKey !== "condition_flags" || CONDITION_FLAG_KEY_SET.has(entry)),
+      )
+    ) {
+      throw new BadRequestException("Value is not allowed by the catalog policy");
+    }
+    return;
+  }
   if (dataType === "enum" && (typeof value === "object" || value === null)) {
     throw new BadRequestException("Enum values must be scalar controlled values");
   }
-  const allowed = allowedValues(policy);
-  if (!allowed || !allowed.some((candidate) => Object.is(candidate, value))) {
+  if (!allowed.some((candidate) => Object.is(candidate, value))) {
     throw new BadRequestException("Value is not allowed by the catalog policy");
   }
 }

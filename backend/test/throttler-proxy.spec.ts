@@ -3,6 +3,7 @@ import { Test, TestingModule } from "@nestjs/testing";
 import { ThrottlerStorage } from "@nestjs/throttler";
 import * as request from "supertest";
 import RedisMock from "ioredis-mock";
+import type Redis from "ioredis";
 import { AppModule } from "../src/app.module";
 import { configureApi } from "../src/bootstrap";
 import { RedisThrottlerStorage } from "../src/throttler/redis-throttler.storage";
@@ -15,7 +16,7 @@ process.env.DATABASE_URL =
   "postgres://postgres:postgres@localhost:5433/safetyspell_integration";
 
 describe("Phase 6 Slice 1: Shared Throttler & Trusted-Proxy IP Resolution", () => {
-  let sharedRedisMock: any;
+  let sharedRedisMock: Redis;
   let appInstance1: INestApplication;
   let appInstance2: INestApplication;
   let dbService: DatabaseService;
@@ -23,7 +24,7 @@ describe("Phase 6 Slice 1: Shared Throttler & Trusted-Proxy IP Resolution", () =
 
   beforeAll(async () => {
     // Shared Redis mock for multi-instance simulation
-    sharedRedisMock = new RedisMock();
+    sharedRedisMock = new RedisMock() as unknown as Redis;
 
     const createTestApp = async (): Promise<INestApplication> => {
       const moduleRef: TestingModule = await Test.createTestingModule({
@@ -48,9 +49,9 @@ describe("Phase 6 Slice 1: Shared Throttler & Trusted-Proxy IP Resolution", () =
     activeTagCode = createPublicTagCode();
     await dbService.query(
       `INSERT INTO tags (
-        code, category, category_id, form, inventory_status, status, holder_kind,
+        code, category, category_id, form, inventory_status, holder_kind,
         activation_pin_hash, pin_failed_attempts, activated_at
-      ) VALUES ($1, 'elderly', (SELECT id FROM categories WHERE key = 'elderly' LIMIT 1), 'band', 'active', 'active', 'company', NULL, 0, NOW())
+      ) VALUES ($1, 'elderly', (SELECT id FROM categories WHERE key = 'elderly' LIMIT 1), 'band', 'active', 'company', NULL, 0, NOW())
       ON CONFLICT (code) DO NOTHING`,
       [activeTagCode],
     );
@@ -162,7 +163,7 @@ describe("Phase 6 Slice 1: Shared Throttler & Trusted-Proxy IP Resolution", () =
         imports: [AppModule],
       })
         .overrideProvider(ThrottlerStorage)
-        .useValue(new RedisThrottlerStorage(brokenRedisMock as any))
+        .useValue(new RedisThrottlerStorage(brokenRedisMock as unknown as Redis))
         .compile();
 
       brokenApp = moduleRef.createNestApplication();
@@ -191,9 +192,9 @@ describe("Phase 6 Slice 1: Shared Throttler & Trusted-Proxy IP Resolution", () =
       const code = createPublicTagCode();
       await dbService.query(
         `INSERT INTO tags (
-          code, category, category_id, form, inventory_status, status, holder_kind,
+          code, category, category_id, form, inventory_status, holder_kind,
           activation_pin_hash, pin_failed_attempts, activated_at
-        ) VALUES ($1, 'elderly', (SELECT id FROM categories WHERE key = 'elderly' LIMIT 1), 'band', 'active', 'active', 'company', NULL, 0, NOW())
+        ) VALUES ($1, 'elderly', (SELECT id FROM categories WHERE key = 'elderly' LIMIT 1), 'band', 'active', 'company', NULL, 0, NOW())
         ON CONFLICT (code) DO NOTHING`,
         [code],
       );

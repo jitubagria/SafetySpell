@@ -13,7 +13,6 @@ import { WardGuardiansService } from "../src/ward-guardians/ward-guardians.servi
 const baseRepository = (): jest.Mocked<RescueRepository> => ({
   findActiveTag: jest.fn(),
   getFilteredPublicProjection: jest.fn(),
-  getPublishedGuidance: jest.fn(),
   writeScanLog: jest.fn(),
   listAuthorizedWards: jest.fn(),
   getAuthorizedWard: jest.fn(),
@@ -61,7 +60,6 @@ describe("Rescue ID V1 adversarial consent boundary", () => {
         },
       ],
     });
-    repo.getPublishedGuidance.mockResolvedValue([]);
     const response = await new ScanResolverService(repo, hashIp()).resolve(
       "SS-opaque-code-1234",
       "203.0.113.7",
@@ -100,6 +98,19 @@ describe("Rescue ID V1 adversarial consent boundary", () => {
     const response = await new ScanResolverService(repo, hashIp()).resolve("a-guess");
     expect(response).toEqual({ status: "tag_unavailable" });
     expect(repo.getFilteredPublicProjection).not.toHaveBeenCalled();
+    expect(repo.writeScanLog).not.toHaveBeenCalled();
+  });
+
+  it("returns the neutral response when an available-tag resolution fails internally", async () => {
+    const repo = baseRepository();
+    repo.findActiveTag.mockResolvedValue({ id: "tag-1", wardId: "ward-1", category: "medical" });
+    repo.getFilteredPublicProjection.mockRejectedValue(new Error("permission denied"));
+
+    const response = await new ScanResolverService(repo, hashIp()).resolve(
+      "known-long-legacy-code",
+    );
+
+    expect(response).toEqual({ status: "tag_unavailable" });
     expect(repo.writeScanLog).not.toHaveBeenCalled();
   });
 
@@ -267,6 +278,69 @@ describe("Rescue ID V1 adversarial consent boundary", () => {
     expect(repo.setVisibility).not.toHaveBeenCalled();
   });
 
+  it("refuses public release for bounded free text outside the explicit allowlist", async () => {
+    const repo = baseRepository();
+    repo.getAuthorizedWard.mockResolvedValue({
+      id: "ward-1",
+      category: "medical",
+      name: "Private",
+      status: "active",
+    });
+    repo.getCatalogField.mockResolvedValue({
+      id: "catalog-1",
+      category: "medical",
+      key: "critical_warning",
+      approved: true,
+      publicEligible: true,
+      maxLevel: "public",
+      dataType: "text",
+      validationPolicy: { max_length: 200 },
+    });
+
+    await expect(
+      new ConsentPrivacyService(repo).setVisibility({
+        actorId: "guardian-1",
+        wardId: "ward-1",
+        catalogId: "catalog-1",
+        visibility: "public",
+        sessionMetadata: {},
+      }),
+    ).rejects.toThrow("public-release catalog gates");
+    expect(repo.setVisibility).not.toHaveBeenCalled();
+  });
+
+  it("permits the explicitly allowlisted condition_notes field to be released", async () => {
+    const repo = baseRepository();
+    repo.getAuthorizedWard.mockResolvedValue({
+      id: "ward-1",
+      category: "medical",
+      name: "Private",
+      status: "active",
+    });
+    repo.getCatalogField.mockResolvedValue({
+      id: "catalog-1",
+      category: "medical",
+      key: "condition_notes",
+      approved: true,
+      publicEligible: true,
+      maxLevel: "public",
+      dataType: "text",
+      validationPolicy: { max_length: 1000 },
+    });
+
+    await new ConsentPrivacyService(repo).setVisibility({
+      actorId: "guardian-1",
+      wardId: "ward-1",
+      catalogId: "catalog-1",
+      visibility: "public",
+      sessionMetadata: {},
+    });
+
+    expect(repo.setVisibility).toHaveBeenCalledWith(
+      expect.objectContaining({ catalogId: "catalog-1", visibility: "public" }),
+    );
+  });
+
   it("sanitises hostile free-text before storage: strips HTML and neutralises links", async () => {
     const repo = baseRepository();
     repo.getAuthorizedWard.mockResolvedValue({
@@ -300,5 +374,118 @@ describe("Rescue ID V1 adversarial consent boundary", () => {
     expect(stored).not.toMatch(/javascript:/i); // no script scheme
     expect(stored).toContain("Penicillin");
     expect(stored).toContain("Peanuts");
+  });
+
+  it("sanitises condition_notes through the same free-text path before storage", async () => {
+    const repo = baseRepository();
+    repo.getAuthorizedWard.mockResolvedValue({
+      id: "ward-1",
+      category: "medical",
+      name: "Private",
+      status: "active",
+    });
+    repo.getCatalogField.mockResolvedValue({
+      id: "catalog-1",
+      category: "medical",
+      key: "condition_notes",
+      approved: true,
+      publicEligible: true,
+      maxLevel: "public",
+      dataType: "text",
+      validationPolicy: { max_length: 1000 },
+    });
+
+    await new WardGuardiansService(repo).writeGuardianValue({
+      userId: "guardian-1",
+      wardId: "ward-1",
+      catalogId: "catalog-1",
+      value:
+        '<strong>Needs help</strong>\nhttps://evil.test\n<a href="javascript:steal()">plain note</a>',
+    });
+
+    const stored = repo.upsertGuardianValue.mock.calls[0]![0].value as string;
+    expect(stored).not.toMatch(/<[^>]*>/);
+    expect(stored).not.toMatch(/https?:\/\//i);
+    expect(stored).not.toMatch(/javascript:/i);
+    expect(stored).toContain("Needs help");
+    expect(stored).toContain("plain note");
+  });
+
+  it("rejects condition flag values outside the locked 12-key set", async () => {
+    const repo = baseRepository();
+    repo.getAuthorizedWard.mockResolvedValue({
+      id: "ward-1",
+      category: "medical",
+      name: "Private",
+      status: "active",
+    });
+    repo.getCatalogField.mockResolvedValue({
+      id: "catalog-1",
+      category: "medical",
+      key: "condition_flags",
+      approved: true,
+      publicEligible: true,
+      maxLevel: "public",
+      dataType: "enum",
+      validationPolicy: {
+        allowed_values: [
+          "epilepsy",
+          "cardiac",
+          "diabetes",
+          "blood_thinner",
+          "dialysis",
+          "pacemaker_implant",
+          "severe_allergy",
+          "asthma_copd",
+          "non_verbal",
+          "hearing_impaired",
+          "vision_impaired",
+          "wandering",
+        ],
+        multi_select: true,
+      },
+    });
+
+    await expect(
+      new WardGuardiansService(repo).writeGuardianValue({
+        userId: "guardian-1",
+        wardId: "ward-1",
+        catalogId: "catalog-1",
+        value: ["epilepsy", "unknown_condition"],
+      }),
+    ).rejects.toThrow("Value is not allowed by the catalog policy");
+    expect(repo.upsertGuardianValue).not.toHaveBeenCalled();
+  });
+
+  it("returns condition flags only when the filtered projection releases them", async () => {
+    const repo = baseRepository();
+    repo.findActiveTag.mockResolvedValue({ id: "tag-1", wardId: "ward-1", category: "medical" });
+    repo.getFilteredPublicProjection.mockResolvedValueOnce({
+      category: "medical",
+      policyVersion: 1,
+      fields: [], // Private visibility is removed by Consent & Privacy before this boundary.
+    });
+    repo.getFilteredPublicProjection.mockResolvedValueOnce({
+      category: "medical",
+      policyVersion: 1,
+      fields: [
+        {
+          key: "condition_flags",
+          label: "Condition flags",
+          value: ["epilepsy"],
+          provenance: "guardian_reported",
+          catalogVersion: 1,
+        },
+      ],
+    });
+    const service = new ScanResolverService(repo, hashIp());
+
+    const privateScan = await service.resolve("known-long-legacy-code");
+    const releasedScan = await service.resolve("known-long-legacy-code");
+
+    expect(privateScan).toEqual(expect.objectContaining({ fields: [] }));
+    expect(releasedScan).toEqual(
+      expect.objectContaining({ fields: [expect.objectContaining({ key: "condition_flags" })] }),
+    );
   });
 });

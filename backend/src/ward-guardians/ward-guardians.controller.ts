@@ -44,12 +44,12 @@ export class WardGuardiansController {
 
   @Get()
   list(@CurrentUser() user: AuthenticatedUser) {
-    return this.wards.list(user.id);
+    return this.wards.list(user.id, user.tenantId);
   }
 
   @Get(":wardId")
   get(@CurrentUser() user: AuthenticatedUser, @Param("wardId", new IsUuidPipe()) wardId: string) {
-    return this.wards.get(user.id, wardId);
+    return this.wards.get(user.id, user.tenantId, wardId);
   }
 
   @Get(":wardId/fields")
@@ -57,12 +57,12 @@ export class WardGuardiansController {
     @CurrentUser() user: AuthenticatedUser,
     @Param("wardId", new IsUuidPipe()) wardId: string,
   ) {
-    return this.wards.fields(user.id, wardId);
+    return this.wards.fields(user.id, user.tenantId, wardId);
   }
 
   @Get(":wardId/tags")
   tags(@CurrentUser() user: AuthenticatedUser, @Param("wardId", new IsUuidPipe()) wardId: string) {
-    return this.wards.tags(user.id, wardId);
+    return this.wards.tags(user.id, user.tenantId, wardId);
   }
 
   @Patch(":wardId/fields/:catalogId")
@@ -72,7 +72,13 @@ export class WardGuardiansController {
     @Param("catalogId", new IsUuidPipe()) catalogId: string,
     @Body() body: WriteFieldDto,
   ) {
-    await this.wards.writeGuardianValue({ userId: user.id, wardId, catalogId, value: body.value });
+    await this.wards.writeGuardianValue({
+      userId: user.id,
+      tenantId: user.tenantId,
+      wardId,
+      catalogId,
+      value: body.value,
+    });
     return { status: "updated", provenance: "guardian_reported" };
   }
 
@@ -85,6 +91,7 @@ export class WardGuardiansController {
   ) {
     await this.consent.setVisibility({
       actorId: user.id,
+      tenantId: user.tenantId,
       wardId,
       catalogId,
       visibility: body.visibility,

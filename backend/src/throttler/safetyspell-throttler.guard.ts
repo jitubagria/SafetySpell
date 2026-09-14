@@ -11,11 +11,7 @@ export class SafetySpellThrottlerGuard extends ThrottlerGuard {
   private readonly fallbackLogger = new Logger(SafetySpellThrottlerGuard.name);
   private readonly localFallbackStore = new Map<string, LocalWindowRecord>();
 
-  private enforceLocalFallback(
-    key: string,
-    limit: number,
-    ttlMs: number,
-  ): boolean {
+  private enforceLocalFallback(key: string, limit: number, ttlMs: number): boolean {
     const now = Date.now();
     const clearBefore = now - ttlMs;
     let record = this.localFallbackStore.get(key);
@@ -34,17 +30,13 @@ export class SafetySpellThrottlerGuard extends ThrottlerGuard {
   }
 
   protected override async handleRequest(requestProps: ThrottlerRequest): Promise<boolean> {
-    const { context, limit, ttl, throttler, blockDuration, getTracker, generateKey } =
-      requestProps;
+    const { context, limit, ttl, throttler, blockDuration, getTracker, generateKey } = requestProps;
     const { req } = this.getRequestResponse(context);
     const path: string = req.path ?? req.url ?? "";
     const isPublicScan = path.startsWith("/v1/public/scan/");
-    const isClaimEndpoint =
-      path.includes("/tags/claim") || path.endsWith("/claim");
+    const isClaimEndpoint = path.includes("/tags/claim") || path.endsWith("/claim");
 
-    const tracker = getTracker
-      ? await getTracker(req, context)
-      : await this.getTracker(req);
+    const tracker = getTracker ? await getTracker(req, context) : await this.getTracker(req);
     const throttlerName = throttler.name ?? "default";
     const key = generateKey
       ? generateKey(context, tracker, throttlerName)
@@ -72,7 +64,7 @@ export class SafetySpellThrottlerGuard extends ThrottlerGuard {
         });
       }
       return true;
-    } catch (storageError: any) {
+    } catch (storageError: unknown) {
       // Re-throw genuine ThrottlerException (rate limit exceeded)
       if (storageError instanceof ThrottlerException) {
         throw storageError;
@@ -80,12 +72,8 @@ export class SafetySpellThrottlerGuard extends ThrottlerGuard {
 
       // Storage failure path (e.g. Redis unreachable or network partition)
       if (isClaimEndpoint) {
-        this.fallbackLogger.error(
-          `Redis outage on PIN claim path [${key}]. Hard fail-closed: 429`,
-        );
-        throw new ThrottlerException(
-          "Rate limit security store unavailable: request rejected",
-        );
+        this.fallbackLogger.error(`Redis outage on PIN claim path [${key}]. Hard fail-closed: 429`);
+        throw new ThrottlerException("Rate limit security store unavailable: request rejected");
       }
 
       if (isPublicScan) {
@@ -99,34 +87,20 @@ export class SafetySpellThrottlerGuard extends ThrottlerGuard {
         const isTestEnv = process.env.NODE_ENV === "test";
         const defaultLimit = throttlerName === "scanCode" ? 2 : 10;
         const localLimit =
-          isTestEnv && !isStrictTest
-            ? throttlerName === "scanCode"
-              ? 50
-              : 500
-            : defaultLimit;
+          isTestEnv && !isStrictTest ? (throttlerName === "scanCode" ? 50 : 500) : defaultLimit;
         const localTtl = 60_000;
         const localKey = `fallback:${throttlerName}:${tracker}`;
 
-        const isAllowed = this.enforceLocalFallback(
-          localKey,
-          localLimit,
-          localTtl,
-        );
+        const isAllowed = this.enforceLocalFallback(localKey, localLimit, localTtl);
         if (!isAllowed) {
-          throw new ThrottlerException(
-            "Emergency scan rate limit exceeded (local fallback)",
-          );
+          throw new ThrottlerException("Emergency scan rate limit exceeded (local fallback)");
         }
         return true;
       }
 
       // Default non-critical routes fail-closed
-      this.fallbackLogger.error(
-        `Redis outage on route [${path}]. Fail-closed: 429`,
-      );
-      throw new ThrottlerException(
-        "Rate limit security store unavailable: request rejected",
-      );
+      this.fallbackLogger.error(`Redis outage on route [${path}]. Fail-closed: 429`);
+      throw new ThrottlerException("Rate limit security store unavailable: request rejected");
     }
   }
 }

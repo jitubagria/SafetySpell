@@ -17,6 +17,7 @@ export class ConsentPrivacyController {
   async withdraw(@CurrentUser() user: AuthenticatedUser, @Param("wardId") wardId: string) {
     await this.consent.withdrawPublicRelease({
       actorId: user.id,
+      tenantId: user.tenantId,
       wardId,
       sessionMetadata: { source: "guardian_api" },
     });
@@ -25,6 +26,6 @@ export class ConsentPrivacyController {
 
   @Get(":wardId/consent-audit")
   audit(@CurrentUser() user: AuthenticatedUser, @Param("wardId") wardId: string) {
-    return this.consent.audit(user.id, wardId);
+    return this.consent.audit(user.id, user.tenantId, wardId);
   }
 }

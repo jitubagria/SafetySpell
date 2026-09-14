@@ -5,6 +5,13 @@ import { ThrottlerModule, ThrottlerStorage } from "@nestjs/throttler";
 import { RedisThrottlerStorage } from "./redis-throttler.storage";
 import { SafetySpellThrottlerGuard } from "./safetyspell-throttler.guard";
 
+function scanCodeTracker(request: Record<string, unknown>): string {
+  const params = request.params;
+  if (typeof params !== "object" || params === null || Array.isArray(params)) return "";
+  const tagCode = (params as Record<string, unknown>).tagCode;
+  return typeof tagCode === "string" ? tagCode.trim().toUpperCase() : "";
+}
+
 @Module({
   imports: [
     ThrottlerModule.forRootAsync({
@@ -23,10 +30,7 @@ import { SafetySpellThrottlerGuard } from "./safetyspell-throttler.guard";
             name: "scanCode",
             ttl: 60_000,
             limit: scanCodeLimit,
-            getTracker: (request: Record<string, any>) =>
-              String(request.params?.tagCode ?? "")
-                .trim()
-                .toUpperCase(),
+            getTracker: scanCodeTracker,
             skipIf: (context) => {
               const request = context.switchToHttp().getRequest<{ path?: string }>();
               return !request.path?.startsWith("/v1/public/scan/");
@@ -37,7 +41,9 @@ import { SafetySpellThrottlerGuard } from "./safetyspell-throttler.guard";
             ttl: 60_000,
             limit: claimLimit,
             skipIf: (context) => {
-              const request = context.switchToHttp().getRequest<{ path?: string; method?: string }>();
+              const request = context
+                .switchToHttp()
+                .getRequest<{ path?: string; method?: string }>();
               const path = request.path ?? "";
               return !(path.includes("/tags/claim") || path.endsWith("/claim"));
             },

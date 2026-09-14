@@ -8,7 +8,7 @@ This is an independent NestJS + PostgreSQL service. It can serve the demo-gated 
 - V1 has only `private` and `public` release. The PostgreSQL enum reserves `verified_emergency_responder`, but database constraints and APIs reject it.
 - `GET /v1/public/scan/:tagCode` receives only the filtered projection. It cannot return an unfiltered ward/profile, address, report, medication history, raw contact target, or internal identifier.
 - A public value requires: active tag, active ward, approved catalog entry, catalog `public_eligible`, catalog `max_level=public`, and explicit ward public visibility.
-- Guardians cannot store arbitrary JSON in a catalog field. Catalog type and validation policy are enforced before persistence. Bounded public free text is permitted only after server-side sanitisation; links and markup are neutralised before storage.
+- Guardians cannot store arbitrary JSON in a catalog field. Catalog type and validation policy are enforced before persistence. Only `allergy` and `condition_notes` are permitted as public free text, through a database constraint and a service-level allowlist; both reuse the same server-side sanitizer, and links and markup are neutralised before storage.
 - Public-capable catalog fields are owner/policy-cleared. Every value is `guardian_reported`; there is no `clinical_reviewer`, clinical-verification, or guidance-publication path.
 - There are no live actions, calls, SMS/WhatsApp, alerts, location sharing, responder routes, NFC security claims, orders, inventory, or pricing in the current V1 baseline.
 - This implementation does **not** claim DPDP compliance. The privacy-notice endpoint is a versioned placeholder; legal notice and review remain required.

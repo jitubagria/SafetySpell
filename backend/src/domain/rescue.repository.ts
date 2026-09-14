@@ -1,5 +1,5 @@
 import { PoolClient } from "pg";
-import { ActiveTag, PublicProjection, PublishedGuidance, Provenance, V1Visibility } from "./types";
+import { ActiveTag, PublicProjection, Provenance, V1Visibility } from "./types";
 
 export const RESCUE_REPOSITORY = Symbol("RESCUE_REPOSITORY");
 
@@ -38,20 +38,32 @@ export interface RescueRepository {
   findActiveTag(code: string): Promise<ActiveTag | null>;
   /** The only public-profile read: query includes every consent gate. */
   getFilteredPublicProjection(wardId: string): Promise<PublicProjection>;
-  getPublishedGuidance(category: string, releasedKeys: string[]): Promise<PublishedGuidance[]>;
   writeScanLog(input: {
     tagId: string;
     policyVersion: number;
     shownFieldKeys: string[];
     ipHash?: string;
   }): Promise<void>;
-  listAuthorizedWards(userId: string): Promise<GuardianWard[]>;
-  getAuthorizedWard(userId: string, wardId: string): Promise<GuardianWard | null>;
+  listAuthorizedWards(userId: string, tenantId: string | undefined): Promise<GuardianWard[]>;
+  getAuthorizedWard(
+    userId: string,
+    tenantId: string | undefined,
+    wardId: string,
+  ): Promise<GuardianWard | null>;
   /** Active scan tags for a ward the guardian is authorised for. Codes only, no ward data. */
-  listAuthorizedWardTags(userId: string, wardId: string): Promise<WardTag[]>;
-  getAuthorizedFields(userId: string, wardId: string): Promise<GuardianField[]>;
+  listAuthorizedWardTags(
+    userId: string,
+    tenantId: string | undefined,
+    wardId: string,
+  ): Promise<WardTag[]>;
+  getAuthorizedFields(
+    userId: string,
+    tenantId: string | undefined,
+    wardId: string,
+  ): Promise<GuardianField[]>;
   assertGuardianPermission(
     userId: string,
+    tenantId: string | undefined,
     wardId: string,
     permission: "fields" | "public_release",
   ): Promise<void>;
@@ -61,21 +73,25 @@ export interface RescueRepository {
     catalogId: string;
     value: unknown;
     actorId: string;
+    tenantId?: string;
   }): Promise<void>;
   setVisibility(input: {
     wardId: string;
     catalogId: string;
     visibility: V1Visibility;
     actorId: string;
+    tenantId?: string;
     sessionMetadata: Record<string, unknown>;
   }): Promise<void>;
   withdrawPublicRelease(input: {
     wardId: string;
     actorId: string;
+    tenantId?: string;
     sessionMetadata: Record<string, unknown>;
   }): Promise<void>;
   getConsentAudit(
     userId: string,
+    tenantId: string | undefined,
     wardId: string,
   ): Promise<
     Array<{

@@ -39,9 +39,7 @@ export class RedisThrottlerStorage implements ThrottlerStorage, OnModuleDestroy 
   private readonly redisClient: Redis;
   private isConnected = false;
 
-  constructor(
-    @Optional() @Inject(REDIS_CLIENT_TOKEN) redisUrlOrClient?: string | Redis,
-  ) {
+  constructor(@Optional() @Inject(REDIS_CLIENT_TOKEN) redisUrlOrClient?: string | Redis) {
     if (typeof redisUrlOrClient === "object" && redisUrlOrClient !== null) {
       this.redisClient = redisUrlOrClient;
       this.isConnected = true;
@@ -49,7 +47,7 @@ export class RedisThrottlerStorage implements ThrottlerStorage, OnModuleDestroy 
       const url =
         typeof redisUrlOrClient === "string"
           ? redisUrlOrClient
-          : process.env.REDIS_URL ?? "redis://localhost:6379";
+          : (process.env.REDIS_URL ?? "redis://localhost:6379");
       const options: RedisOptions = {
         maxRetriesPerRequest: 1,
         enableOfflineQueue: false,
@@ -115,9 +113,10 @@ export class RedisThrottlerStorage implements ThrottlerStorage, OnModuleDestroy 
         isBlocked,
         timeToBlockExpire: timeToExpire,
       };
-    } catch (err: any) {
+    } catch (err: unknown) {
       this.isConnected = false;
-      this.logger.error(`Redis increment failed for ${namespacedKey}: ${err.message}`);
+      const message = err instanceof Error ? err.message : "Unknown Redis error";
+      this.logger.error(`Redis increment failed for ${namespacedKey}: ${message}`);
       throw err;
     }
   }

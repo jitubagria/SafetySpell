@@ -15,6 +15,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { DemoGate } from "@/components/demo-gate";
 import { WardTagQr } from "@/components/ward-tag-qr";
+import { conditionFlagDefinitions, knownConditionFlagKeys } from "@/lib/condition-flags";
 import {
   type ApiGuardianField,
   type ApiWardTag,
@@ -117,7 +118,7 @@ function GuardianApp() {
     }
   }
 
-  async function updateField(field: ApiGuardianField, value: string) {
+  async function updateField(field: ApiGuardianField, value: unknown) {
     if (!token || !selectedWard) return;
     setPendingFieldId(field.catalogId);
     setUpdateError(null);
@@ -169,7 +170,7 @@ function GuardianApp() {
           </p>
           <h1 className="mt-1 font-display text-3xl font-bold">Guardian access</h1>
           <p className="mt-2 text-base text-muted-foreground">
-            Local Core API mode. Age band, primary language, blood group and allergies are available
+            Local Core API mode. Profile fields, condition flags, and condition notes are available
             in this prototype.
           </p>
         </header>
@@ -303,7 +304,7 @@ function GuardianWorkspace({
   tagsError: Error | null;
   pendingFieldId: string | null;
   updateError: string | null;
-  onUpdateField: (field: ApiGuardianField, value: string) => Promise<void>;
+  onUpdateField: (field: ApiGuardianField, value: unknown) => Promise<void>;
   onUpdateVisibility: (field: ApiGuardianField) => Promise<void>;
   onSignOut: () => void;
 }) {
@@ -401,14 +402,16 @@ function GuardianWorkspace({
   );
 }
 
-function AllergyInput({
+function NotesInput({
   current,
   pending,
   onSave,
+  fieldLabel,
 }: {
   current: string;
   pending: boolean;
   onSave: (value: string) => Promise<void>;
+  fieldLabel: string;
 }) {
   const [draft, setDraft] = useState(current);
   useEffect(() => {
@@ -420,16 +423,53 @@ function AllergyInput({
         className="min-h-24 rounded-md border border-input bg-background px-3 py-2 font-normal"
         value={draft}
         disabled={pending}
-        placeholder={"One allergy per line\ne.g.\nPenicillin\nPeanuts"}
+        placeholder={`One ${fieldLabel.toLowerCase()} point per line`}
         onChange={(event) => setDraft(event.target.value)}
         onBlur={() => {
           if (draft !== current) void onSave(draft);
         }}
       />
       <span className="text-xs font-normal text-muted-foreground">
-        One allergy per line. Links and formatting are stripped on save.
+        One point per line. Links and formatting are stripped on save.
       </span>
     </div>
+  );
+}
+
+function ConditionFlagsInput({
+  current,
+  pending,
+  onSave,
+}: {
+  current: unknown;
+  pending: boolean;
+  onSave: (value: string[]) => Promise<void>;
+}) {
+  const selected = new Set(knownConditionFlagKeys(current));
+  return (
+    <fieldset className="grid gap-2 font-normal sm:grid-cols-2">
+      <legend className="sr-only">Condition flags</legend>
+      {conditionFlagDefinitions.map((flag) => (
+        <label key={flag.key} className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={selected.has(flag.key)}
+            disabled={pending}
+            onChange={(event) => {
+              const next = new Set(selected);
+              if (event.target.checked) next.add(flag.key);
+              else next.delete(flag.key);
+              void onSave(
+                conditionFlagDefinitions
+                  .filter((item) => next.has(item.key))
+                  .map((item) => item.key),
+              );
+            }}
+          />
+          {flag.label}
+        </label>
+      ))}
+    </fieldset>
   );
 }
 
@@ -441,22 +481,33 @@ function FieldEditor({
 }: {
   field: ApiGuardianField;
   pending: boolean;
-  onUpdateField: (field: ApiGuardianField, value: string) => Promise<void>;
+  onUpdateField: (field: ApiGuardianField, value: unknown) => Promise<void>;
   onUpdateVisibility: (field: ApiGuardianField) => Promise<void>;
 }) {
-  const isFreeText = field.key === "allergy";
+  const isFreeText = field.key === "allergy" || field.key === "condition_notes";
+  const isConditionFlags = field.key === "condition_flags";
   const options = (valuesByKey as Record<string, ReadonlyArray<readonly [string, string]>>)[
     field.key
   ];
-  if (!isFreeText && !options) return null;
+  if (!isFreeText && !isConditionFlags && !options) return null;
   const current = typeof field.value === "string" ? field.value : "";
+  const hasValue = isConditionFlags
+    ? knownConditionFlagKeys(field.value).length > 0
+    : Boolean(current);
   return (
     <div className="rounded-lg border border-border p-4">
       <label className="grid gap-2 text-sm font-bold">
         {field.label}
         {isFreeText ? (
-          <AllergyInput
+          <NotesInput
             current={current}
+            pending={pending}
+            fieldLabel={field.label}
+            onSave={(value) => onUpdateField(field, value)}
+          />
+        ) : isConditionFlags ? (
+          <ConditionFlagsInput
+            current={field.value}
             pending={pending}
             onSave={(value) => onUpdateField(field, value)}
           />
@@ -490,7 +541,7 @@ function FieldEditor({
           variant="outline"
           size="sm"
           type="button"
-          disabled={pending || !current || !field.publicReleaseEligible}
+          disabled={pending || !hasValue || !field.publicReleaseEligible}
           onClick={() => {
             void onUpdateVisibility(field);
           }}

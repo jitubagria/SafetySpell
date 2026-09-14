@@ -32,11 +32,11 @@ export class TagAssignmentService {
     const normalizedPin = normalizeActivationPin(rawPin);
 
     // Verify guardian authority over ward
-    const wardAuth = await this.db.query(
-      `SELECT w.id FROM wards w
+    const wardAuth = await this.db.query<{ id: string; category_id: string }>(
+      `SELECT w.id, w.category_id FROM wards w
        JOIN ward_guardians g ON g.ward_id = w.id AND g.user_id = $1 AND g.active = true
-       WHERE w.id = $2 AND w.status = 'active'`,
-      [actor.id, wardId],
+       WHERE w.id = $3 AND w.tenant_id = $2 AND g.tenant_id = $2 AND w.status = 'active'`,
+      [actor.id, actor.tenantId, wardId],
     );
     if (!wardAuth.rowCount) {
       throw new ForbiddenException("Guardian is not authorised for this ward");
@@ -45,6 +45,7 @@ export class TagAssignmentService {
     const tagResult = await this.db.query<{
       id: string;
       code: string;
+      category_id: string;
       inventory_status: string;
       holder_kind: string;
       activation_pin_hash: string | null;
@@ -52,11 +53,11 @@ export class TagAssignmentService {
       pin_locked_until: Date | null;
       pin_expires_at: Date | null;
     }>(
-      `SELECT id, code, inventory_status, holder_kind, activation_pin_hash,
+      `SELECT id, code, category_id, inventory_status, holder_kind, activation_pin_hash,
               pin_failed_attempts, pin_locked_until, pin_expires_at
        FROM tags
-       WHERE upper(code) = upper($1)`,
-      [normalizedCode],
+       WHERE upper(code) = upper($1) AND tenant_id = $2`,
+      [normalizedCode, actor.tenantId],
     );
 
     const tag = tagResult.rows[0];
@@ -86,6 +87,13 @@ export class TagAssignmentService {
       throw new BadRequestException("Invalid tag code or activation PIN");
     }
 
+    // Category equality is a database constraint as well as a claim-time safety
+    // gate. Do not reveal a mismatch through the public claim response.
+    if (tag.category_id !== wardAuth.rows[0]!.category_id) {
+      await bcrypt.compare(normalizedPin, DUMMY_BCRYPT_HASH);
+      throw new BadRequestException("Invalid tag code or activation PIN");
+    }
+
     // Verify PIN
     const pinMatches = await bcrypt.compare(normalizedPin, tag.activation_pin_hash!);
     if (!pinMatches) {
@@ -100,14 +108,14 @@ export class TagAssignmentService {
         await this.db.query(
           `UPDATE tags
            SET pin_failed_attempts = $2, pin_locked_until = ${lockUntil}
-           WHERE id = $1`,
-          [tag.id, nextFailed],
+           WHERE id = $1 AND tenant_id = $3`,
+          [tag.id, nextFailed, actor.tenantId],
         );
       } else {
-        await this.db.query(`UPDATE tags SET pin_failed_attempts = $2 WHERE id = $1`, [
-          tag.id,
-          nextFailed,
-        ]);
+        await this.db.query(
+          `UPDATE tags SET pin_failed_attempts = $2 WHERE id = $1 AND tenant_id = $3`,
+          [tag.id, nextFailed, actor.tenantId],
+        );
       }
       throw new BadRequestException("Invalid tag code or activation PIN");
     }
@@ -115,8 +123,8 @@ export class TagAssignmentService {
     // Successful Claim: run atomic transaction to transition blank -> assigned
     return this.db.transaction(async (client) => {
       const lockedTag = await client.query<{ id: string; inventory_status: string }>(
-        `SELECT id, inventory_status FROM tags WHERE id = $1 FOR UPDATE`,
-        [tag.id],
+        `SELECT id, inventory_status FROM tags WHERE id = $1 AND tenant_id = $2 FOR UPDATE`,
+        [tag.id, actor.tenantId],
       );
       if (lockedTag.rows[0]?.inventory_status !== "blank") {
         throw new BadRequestException("Invalid tag code or activation PIN");
@@ -136,8 +144,8 @@ export class TagAssignmentService {
              activation_pin_hash = NULL,
              pin_failed_attempts = 0,
              pin_locked_until = NULL
-         WHERE id = $1`,
-        [tag.id, wardId, actor.id],
+         WHERE id = $1 AND tenant_id = $4`,
+        [tag.id, wardId, actor.id, actor.tenantId],
       );
 
       // Append single immutable 'assigned' tag_event
@@ -171,8 +179,8 @@ export class TagAssignmentService {
       `SELECT w.id, g.can_manage_fields, g.can_manage_public_release
        FROM wards w
        JOIN ward_guardians g ON g.ward_id = w.id AND g.user_id = $1 AND g.active = true
-       WHERE w.id = $2 AND w.status = 'active'`,
-      [actor.id, wardId],
+       WHERE w.id = $3 AND w.tenant_id = $2 AND g.tenant_id = $2 AND w.status = 'active'`,
+      [actor.id, actor.tenantId, wardId],
     );
     const authRow = wardAuth.rows[0];
     if (!authRow) {
@@ -186,8 +194,9 @@ export class TagAssignmentService {
     const dataCountResult = await this.db.query<{ count: string }>(
       `SELECT count(*)::text as count
        FROM ward_field_values
-       WHERE ward_id = $1 AND value IS NOT NULL AND value::text NOT IN ('null', '""', '{}')`,
-      [wardId],
+       WHERE ward_id = $1 AND value IS NOT NULL AND value::text NOT IN ('null', '""', '{}')
+         AND EXISTS (SELECT 1 FROM wards WHERE id = $1 AND tenant_id = $2)`,
+      [wardId, actor.tenantId],
     );
     const hasData = parseInt(dataCountResult.rows[0]?.count ?? "0", 10) > 0;
     if (!hasData) {
@@ -202,13 +211,13 @@ export class TagAssignmentService {
        FROM ward_field_values v
        JOIN ward_field_visibility vis ON vis.ward_id = v.ward_id AND vis.field_catalog_id = v.field_catalog_id
        JOIN field_catalog f ON f.id = v.field_catalog_id
-       WHERE v.ward_id = $1
+       WHERE v.ward_id = $1 AND EXISTS (SELECT 1 FROM wards WHERE id = $1 AND tenant_id = $2)
          AND v.value IS NOT NULL AND v.value::text NOT IN ('null', '""', '{}')
          AND vis.visibility = 'public'
          AND f.approved = true
          AND f.public_eligible = true
          AND f.max_level = 'public'`,
-      [wardId],
+      [wardId, actor.tenantId],
     );
     const hasReleasedData = parseInt(releasedDataCountResult.rows[0]?.count ?? "0", 10) > 0;
     if (!hasReleasedData) {
@@ -222,16 +231,15 @@ export class TagAssignmentService {
       id: string;
       code: string;
       inventory_status: string;
-      status: string;
       holder_kind: string;
       holder_guardian_user_id: string | null;
       ward_id: string | null;
       activated_at: Date | null;
     }>(
-      `SELECT id, code, inventory_status, status, holder_kind, holder_guardian_user_id, ward_id, activated_at
+      `SELECT id, code, inventory_status, holder_kind, holder_guardian_user_id, ward_id, activated_at
        FROM tags
-       WHERE upper(code) = upper($1)`,
-      [normalizedCode],
+       WHERE upper(code) = upper($1) AND tenant_id = $2`,
+      [normalizedCode, actor.tenantId],
     );
     const tag = tagResult.rows[0];
     if (!tag) {
@@ -246,7 +254,7 @@ export class TagAssignmentService {
     }
 
     // Idempotent if already active
-    if (tag.inventory_status === "active" && tag.status === "active") {
+    if (tag.inventory_status === "active") {
       return {
         success: true,
         code: tag.code,
@@ -264,11 +272,11 @@ export class TagAssignmentService {
       const locked = await client.query<{
         id: string;
         inventory_status: string;
-        status: string;
         activated_at: Date | null;
-      }>(`SELECT id, inventory_status, status, activated_at FROM tags WHERE id = $1 FOR UPDATE`, [
-        tag.id,
-      ]);
+      }>(
+        `SELECT id, inventory_status, activated_at FROM tags WHERE id = $1 AND tenant_id = $2 FOR UPDATE`,
+        [tag.id, actor.tenantId],
+      );
       const currentLocked = locked.rows[0];
       if (currentLocked?.inventory_status === "active") {
         return {
@@ -287,12 +295,11 @@ export class TagAssignmentService {
       const updateRes = await client.query<{ activated_at: Date }>(
         `UPDATE tags
          SET inventory_status = 'active',
-             status = 'active',
              activated_at = COALESCE(activated_at, now()),
              status_changed_at = now()
-         WHERE id = $1
+         WHERE id = $1 AND tenant_id = $2
          RETURNING activated_at`,
-        [tag.id],
+        [tag.id, actor.tenantId],
       );
 
       const activatedAt = updateRes.rows[0]?.activated_at ?? new Date();

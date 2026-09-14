@@ -20,18 +20,20 @@ class CreateBatchDto {
 export class AdminTagsController {
   constructor(private readonly tags: AdminTagsService) {}
   @Post() create(@CurrentUser() user: AuthenticatedUser, @Body() body: CreateBatchDto) {
-    return this.tags.create(user.id, body);
+    return this.tags.create(user, body);
   }
   @Get("tags/:tagCode.png") @Header("Content-Type", "image/png") async png(
+    @CurrentUser() user: AuthenticatedUser,
     @Param("tagCode") code: string,
     @Res() response: Response,
   ) {
-    response.send(await this.tags.png(code));
+    response.send(await this.tags.png(user, code));
   }
   @Get(":batchId/print.pdf") @Header("Content-Type", "application/pdf") async pdf(
+    @CurrentUser() user: AuthenticatedUser,
     @Param("batchId") id: string,
     @Res() response: Response,
   ) {
-    response.send(await this.tags.pdf(id));
+    response.send(await this.tags.pdf(user, id));
   }
 }

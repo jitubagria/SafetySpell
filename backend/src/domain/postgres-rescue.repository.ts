@@ -1,7 +1,8 @@
 import { ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
 import { PoolClient } from "pg";
 import { DatabaseService } from "../database/database.service";
-import { ActiveTag, PublicProjection, PublishedGuidance, Provenance, V1Visibility } from "./types";
+import { CONDITION_FLAG_KEYS } from "../category-catalog/catalog-value-validation";
+import { ActiveTag, PublicProjection, Provenance, V1Visibility } from "./types";
 import {
   CatalogField,
   GuardianField,
@@ -12,6 +13,15 @@ import {
 
 type Row = Record<string, unknown>;
 const asString = (row: Row, key: string): string => String(row[key]);
+const conditionFlagKeySet = new Set<string>(CONDITION_FLAG_KEYS);
+
+function filteredPublicValue(key: string, value: unknown): unknown {
+  if (key !== "condition_flags") return value;
+  if (!Array.isArray(value)) return [];
+  return value.filter((entry): entry is string =>
+    typeof entry === "string" ? conditionFlagKeySet.has(entry) : false,
+  );
+}
 
 @Injectable()
 export class PostgresRescueRepository implements RescueRepository {
@@ -21,7 +31,7 @@ export class PostgresRescueRepository implements RescueRepository {
     const result = await this.db.query<Row>(
       `SELECT t.id, t.ward_id, t.category FROM tags t
        JOIN wards w ON w.id = t.ward_id AND w.status = 'active'
-       WHERE upper(t.code) = upper($1) AND t.status = 'active' AND t.ward_id IS NOT NULL`,
+       WHERE upper(t.code) = upper($1) AND t.inventory_status = 'active' AND t.ward_id IS NOT NULL`,
       [code],
     );
     const row = result.rows[0];
@@ -54,39 +64,23 @@ export class PostgresRescueRepository implements RescueRepository {
     );
     const categoryRow = categoryResult.rows[0];
     if (!categoryRow) throw new NotFoundException("Ward unavailable");
-    const fields = result.rows.map((row) => ({
-      key: asString(row, "field_key"),
-      label: asString(row, "label"),
-      value: row.value,
-      provenance: asString(row, "provenance") as Provenance,
-      catalogVersion: Number(row.catalog_version),
-    }));
+    const fields = result.rows
+      .map((row) => {
+        const key = asString(row, "field_key");
+        return {
+          key,
+          label: asString(row, "label"),
+          value: filteredPublicValue(key, row.value),
+          provenance: asString(row, "provenance") as Provenance,
+          catalogVersion: Number(row.catalog_version),
+        };
+      })
+      .filter((field) => field.key !== "condition_flags" || (field.value as string[]).length > 0);
     return {
       category: first ? asString(first, "category") : asString(categoryRow, "category"),
       fields,
       policyVersion: Math.max(1, ...fields.map((field) => field.catalogVersion)),
     };
-  }
-
-  async getPublishedGuidance(
-    category: string,
-    releasedKeys: string[],
-  ): Promise<PublishedGuidance[]> {
-    const result = await this.db.query<Row>(
-      `SELECT r.id, r.current_version, v.do_items, v.dont_items
-       FROM guidance_rules r
-       JOIN guidance_rule_versions v ON v.guidance_rule_id = r.id AND v.version = r.current_version
-       WHERE r.category = $1 AND r.review_status = 'published'
-         AND (r.expires_at IS NULL OR r.expires_at > now())
-         AND (r.condition_key IS NULL OR r.condition_key = ANY($2::text[]))`,
-      [category, releasedKeys],
-    );
-    return result.rows.map((row) => ({
-      ruleId: asString(row, "id"),
-      version: Number(row.current_version),
-      do: row.do_items as string[],
-      dont: row.dont_items as string[],
-    }));
   }
 
   async writeScanLog(input: {
@@ -101,11 +95,11 @@ export class PostgresRescueRepository implements RescueRepository {
     );
   }
 
-  async listAuthorizedWards(userId: string): Promise<GuardianWard[]> {
+  async listAuthorizedWards(userId: string, tenantId: string | undefined): Promise<GuardianWard[]> {
     const result = await this.db.query<Row>(
       `SELECT w.id, w.category, w.name, w.status FROM wards w JOIN ward_guardians g ON g.ward_id = w.id
-       WHERE g.user_id = $1 AND g.active = true ORDER BY w.created_at`,
-      [userId],
+       WHERE g.user_id = $1 AND w.tenant_id = $2 AND g.tenant_id = $2 AND g.active = true ORDER BY w.created_at`,
+      [userId, tenantId],
     );
     return result.rows.map((row) => ({
       id: asString(row, "id"),
@@ -115,11 +109,15 @@ export class PostgresRescueRepository implements RescueRepository {
     }));
   }
 
-  async getAuthorizedWard(userId: string, wardId: string): Promise<GuardianWard | null> {
+  async getAuthorizedWard(
+    userId: string,
+    tenantId: string | undefined,
+    wardId: string,
+  ): Promise<GuardianWard | null> {
     const result = await this.db.query<Row>(
       `SELECT w.id, w.category, w.name, w.status FROM wards w JOIN ward_guardians g ON g.ward_id = w.id
-       WHERE g.user_id = $1 AND w.id = $2 AND g.active = true`,
-      [userId, wardId],
+       WHERE g.user_id = $1 AND w.id = $3 AND w.tenant_id = $2 AND g.tenant_id = $2 AND g.active = true`,
+      [userId, tenantId, wardId],
     );
     const row = result.rows[0];
     return row
@@ -132,15 +130,19 @@ export class PostgresRescueRepository implements RescueRepository {
       : null;
   }
 
-  async listAuthorizedWardTags(userId: string, wardId: string): Promise<WardTag[]> {
+  async listAuthorizedWardTags(
+    userId: string,
+    tenantId: string | undefined,
+    wardId: string,
+  ): Promise<WardTag[]> {
     // Authorisation is enforced in the join: only a guardian's own active tags surface,
     // and only the opaque code + form are returned — never ward data.
     const result = await this.db.query<Row>(
       `SELECT t.code, t.form FROM tags t
-       JOIN ward_guardians g ON g.ward_id = t.ward_id AND g.user_id = $1 AND g.active = true
-       WHERE t.ward_id = $2 AND t.status = 'active'
+       JOIN ward_guardians g ON g.ward_id = t.ward_id AND g.user_id = $1 AND g.tenant_id = $2 AND g.active = true
+       WHERE t.ward_id = $3 AND t.tenant_id = $2 AND t.inventory_status = 'active'
        ORDER BY t.created_at`,
-      [userId, wardId],
+      [userId, tenantId, wardId],
     );
     return result.rows.map((row) => ({
       code: asString(row, "code"),
@@ -148,8 +150,12 @@ export class PostgresRescueRepository implements RescueRepository {
     }));
   }
 
-  async getAuthorizedFields(userId: string, wardId: string): Promise<GuardianField[]> {
-    const allowed = await this.getAuthorizedWard(userId, wardId);
+  async getAuthorizedFields(
+    userId: string,
+    tenantId: string | undefined,
+    wardId: string,
+  ): Promise<GuardianField[]> {
+    const allowed = await this.getAuthorizedWard(userId, tenantId, wardId);
     if (!allowed) throw new ForbiddenException("No active guardian authorization");
     const result = await this.db.query<Row>(
       `SELECT f.id AS catalog_id, f.field_key, f.label, value.value, value.provenance,
@@ -160,16 +166,17 @@ export class PostgresRescueRepository implements RescueRepository {
                   AND jsonb_typeof(f.validation_policy->'allowed_values') = 'array'
                   AND jsonb_array_length(f.validation_policy->'allowed_values') > 0)
                  OR
-                 (f.data_type IN ('text', 'short_text')
+                 (f.field_key IN ('allergy', 'condition_notes')
+                  AND f.data_type IN ('text', 'short_text')
                   AND jsonb_typeof(f.validation_policy->'max_length') = 'number')
                )) AS public_release_eligible
        FROM wards w
        JOIN field_catalog f ON f.category = w.category AND f.guardian_editable = true
        LEFT JOIN ward_field_values value ON value.ward_id = w.id AND value.field_catalog_id = f.id
        LEFT JOIN ward_field_visibility visibility ON visibility.ward_id = w.id AND visibility.field_catalog_id = f.id
-       WHERE w.id = $1
+       WHERE w.id = $1 AND w.tenant_id = $2
        ORDER BY f.field_key`,
-      [wardId],
+      [wardId, tenantId],
     );
     return result.rows.map((row) => ({
       catalogId: asString(row, "catalog_id"),
@@ -186,13 +193,14 @@ export class PostgresRescueRepository implements RescueRepository {
 
   async assertGuardianPermission(
     userId: string,
+    tenantId: string | undefined,
     wardId: string,
     permission: "fields" | "public_release",
   ): Promise<void> {
     const column = permission === "fields" ? "can_manage_fields" : "can_manage_public_release";
     const result = await this.db.query<Row>(
-      `SELECT ${column} AS allowed FROM ward_guardians WHERE user_id = $1 AND ward_id = $2 AND active = true`,
-      [userId, wardId],
+      `SELECT ${column} AS allowed FROM ward_guardians WHERE user_id = $1 AND tenant_id = $2 AND ward_id = $3 AND active = true`,
+      [userId, tenantId, wardId],
     );
     if (!result.rows[0]?.allowed)
       throw new ForbiddenException("Guardian is not authorised for this operation");
@@ -223,12 +231,13 @@ export class PostgresRescueRepository implements RescueRepository {
     catalogId: string;
     value: unknown;
     actorId: string;
+    tenantId: string | undefined;
   }): Promise<void> {
     await this.db.query(
       `INSERT INTO ward_field_values(ward_id, field_catalog_id, value, provenance, updated_by)
-       VALUES ($1, $2, $3::jsonb, 'guardian_reported', $4)
+       SELECT $1, $2, $3::jsonb, 'guardian_reported', $4 FROM wards WHERE id = $1 AND tenant_id = $5
        ON CONFLICT (ward_id, field_catalog_id) DO UPDATE SET value = EXCLUDED.value, provenance = 'guardian_reported', updated_by = EXCLUDED.updated_by, updated_at = now()`,
-      [input.wardId, input.catalogId, JSON.stringify(input.value), input.actorId],
+      [input.wardId, input.catalogId, JSON.stringify(input.value), input.actorId, input.tenantId],
     );
   }
 
@@ -237,18 +246,21 @@ export class PostgresRescueRepository implements RescueRepository {
     catalogId: string;
     visibility: V1Visibility;
     actorId: string;
+    tenantId: string | undefined;
     sessionMetadata: Record<string, unknown>;
   }): Promise<void> {
     await this.db.transaction(async (client) => {
       const prior = await client.query<Row>(
-        "SELECT visibility FROM ward_field_visibility WHERE ward_id = $1 AND field_catalog_id = $2 FOR UPDATE",
-        [input.wardId, input.catalogId],
+        `SELECT visibility FROM ward_field_visibility visibility JOIN wards ward ON ward.id = visibility.ward_id
+         WHERE visibility.ward_id = $1 AND visibility.field_catalog_id = $2 AND ward.tenant_id = $3 FOR UPDATE`,
+        [input.wardId, input.catalogId, input.tenantId],
       );
       const old = (prior.rows[0]?.visibility ?? "private") as V1Visibility;
       await client.query(
-        `INSERT INTO ward_field_visibility(ward_id, field_catalog_id, visibility, updated_by) VALUES ($1, $2, $3, $4)
+        `INSERT INTO ward_field_visibility(ward_id, field_catalog_id, visibility, updated_by)
+         SELECT $1, $2, $3, $4 FROM wards WHERE id = $1 AND tenant_id = $5
          ON CONFLICT (ward_id, field_catalog_id) DO UPDATE SET visibility = EXCLUDED.visibility, updated_by = EXCLUDED.updated_by, updated_at = now()`,
-        [input.wardId, input.catalogId, input.visibility, input.actorId],
+        [input.wardId, input.catalogId, input.visibility, input.actorId, input.tenantId],
       );
       await client.query(
         `INSERT INTO consent_audit(ward_id, field_catalog_id, event_type, old_visibility, new_visibility, changed_by, session_metadata)
@@ -268,15 +280,16 @@ export class PostgresRescueRepository implements RescueRepository {
   async withdrawPublicRelease(input: {
     wardId: string;
     actorId: string;
+    tenantId: string | undefined;
     sessionMetadata: Record<string, unknown>;
   }): Promise<void> {
     await this.db.transaction(async (client) => {
       const changed = await client.query<Row>(
         `WITH changed AS (UPDATE ward_field_visibility SET visibility = 'private', updated_by = $2, updated_at = now()
-          WHERE ward_id = $1 AND visibility = 'public' RETURNING field_catalog_id)
+          WHERE ward_id = $1 AND visibility = 'public' AND EXISTS (SELECT 1 FROM wards WHERE id = $1 AND tenant_id = $4) RETURNING field_catalog_id)
          INSERT INTO consent_audit(ward_id, field_catalog_id, event_type, old_visibility, new_visibility, changed_by, session_metadata)
          SELECT $1, field_catalog_id, 'visibility_changed', 'public', 'private', $2, $3::jsonb FROM changed RETURNING id`,
-        [input.wardId, input.actorId, JSON.stringify(input.sessionMetadata)],
+        [input.wardId, input.actorId, JSON.stringify(input.sessionMetadata), input.tenantId],
       );
       await client.query(
         `INSERT INTO consent_audit(ward_id, event_type, changed_by, session_metadata)
@@ -292,6 +305,7 @@ export class PostgresRescueRepository implements RescueRepository {
 
   async getConsentAudit(
     userId: string,
+    tenantId: string | undefined,
     wardId: string,
   ): Promise<
     Array<{
@@ -302,13 +316,14 @@ export class PostgresRescueRepository implements RescueRepository {
       createdAt: string;
     }>
   > {
-    const ward = await this.getAuthorizedWard(userId, wardId);
+    const ward = await this.getAuthorizedWard(userId, tenantId, wardId);
     if (!ward) throw new ForbiddenException("No active guardian authorization");
     const result = await this.db.query<Row>(
       `SELECT audit.event_type, catalog.field_key, audit.old_visibility, audit.new_visibility, audit.created_at
-       FROM consent_audit audit LEFT JOIN field_catalog catalog ON catalog.id = audit.field_catalog_id
-       WHERE audit.ward_id = $1 ORDER BY audit.created_at DESC`,
-      [wardId],
+       FROM tenant_ledger_audit scope JOIN consent_audit audit ON audit.id = scope.ledger_id
+       LEFT JOIN field_catalog catalog ON catalog.id = audit.field_catalog_id
+       WHERE scope.ledger_type = 'consent_audit' AND scope.tenant_id = $2 AND audit.ward_id = $1 ORDER BY audit.created_at DESC`,
+      [wardId, tenantId],
     );
     return result.rows.map((row) => ({
       eventType: asString(row, "event_type"),

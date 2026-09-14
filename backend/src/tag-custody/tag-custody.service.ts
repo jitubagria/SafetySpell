@@ -29,9 +29,9 @@ export class TagCustodyService {
     const tag = await this.db.query<TagAuthorityRow>(
       `SELECT t.id, t.holder_kind, t.holder_distributor_id, t.holder_guardian_user_id,
               t.category_id, actor.distributor_id AS actor_distributor_id
-       FROM tags t JOIN users actor ON actor.id = $1 AND actor.status = 'active'
-       WHERE upper(t.code) = upper($2)`,
-      [actor.id, normalizeTagCode(tagCode)],
+       FROM tags t JOIN users actor ON actor.id = $1 AND actor.status = 'active' AND actor.tenant_id = $2
+       WHERE upper(t.code) = upper($3) AND t.tenant_id = $2`,
+      [actor.id, actor.tenantId, normalizeTagCode(tagCode)],
     );
     const row = tag.rows[0];
     if (!row) throw new NotFoundException("Tag unavailable");
@@ -61,8 +61,8 @@ export class TagCustodyService {
       throw new ForbiddenException("Company admin authority is required");
     return this.db.transaction(async (client) => {
       const batch = await client.query<{ category_id: string }>(
-        "SELECT category_id FROM tag_batches WHERE id = $1 FOR UPDATE",
-        [batchId],
+        "SELECT category_id FROM tag_batches WHERE id = $1 AND tenant_id = $2 FOR UPDATE",
+        [batchId, actor.tenantId],
       );
       if (!batch.rows[0]) throw new NotFoundException("Batch unavailable");
       const permitted = await client.query(
@@ -74,20 +74,20 @@ export class TagCustodyService {
       if (!permitted.rowCount)
         throw new ForbiddenException("Distributor may not hold this category");
       const tags = await client.query<{ id: string }>(
-        "SELECT id FROM tags WHERE batch_id = $1 FOR UPDATE",
-        [batchId],
+        "SELECT id FROM tags WHERE batch_id = $1 AND tenant_id = $2 FOR UPDATE",
+        [batchId, actor.tenantId],
       );
       if (!tags.rowCount) throw new NotFoundException("Batch unavailable");
       const ids = tags.rows.map((tag) => tag.id);
       const transferable = await client.query<{ id: string }>(
         `SELECT id FROM tags WHERE id = ANY($1::uuid[]) AND inventory_status = 'blank'
-           AND holder_kind = 'company' FOR UPDATE`,
-        [ids],
+           AND holder_kind = 'company' AND tenant_id = $2 FOR UPDATE`,
+        [ids, actor.tenantId],
       );
       if (transferable.rowCount !== ids.length)
         throw new BadRequestException("Only company-held blank tags may be allocated");
 
-      await this.allocateLocked(client, ids, actor.id, distributorId);
+      await this.allocateLocked(client, ids, actor.id, actor.tenantId, distributorId);
       return { batchId, distributorId, count: ids.length };
     });
   }
@@ -96,13 +96,14 @@ export class TagCustodyService {
     client: PoolClient,
     tagIds: string[],
     actorId: string,
+    tenantId: string | undefined,
     distributorId: string,
   ): Promise<void> {
     await client.query(
       `UPDATE tags SET holder_kind = 'distributor', holder_distributor_id = $2,
          holder_guardian_user_id = NULL, source_distributor_id = COALESCE(source_distributor_id, $2),
-         status_changed_at = now() WHERE id = ANY($1::uuid[])`,
-      [tagIds, distributorId],
+         status_changed_at = now() WHERE id = ANY($1::uuid[]) AND tenant_id = $3`,
+      [tagIds, distributorId, tenantId],
     );
     await client.query(
       `INSERT INTO tag_events(tag_id, event_type, actor_user_id, from_status, to_status, metadata)

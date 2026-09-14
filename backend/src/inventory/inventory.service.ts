@@ -58,8 +58,8 @@ export class InventoryService {
     let distributorId: string | null = null;
     if (actor.role === "distributor") {
       const userRes = await this.db.query<{ distributor_id: string | null }>(
-        "SELECT distributor_id FROM users WHERE id = $1",
-        [actor.id],
+        "SELECT distributor_id FROM users WHERE id = $1 AND tenant_id = $2",
+        [actor.id, actor.tenantId],
       );
       distributorId = userRes.rows[0]?.distributor_id ?? null;
       if (!distributorId) {
@@ -70,6 +70,10 @@ export class InventoryService {
     const whereClauses: string[] = [];
     const params: unknown[] = [];
     let paramIdx = 1;
+
+    whereClauses.push(`t.tenant_id = $${paramIdx}`);
+    params.push(actor.tenantId);
+    paramIdx++;
 
     // Role-scoped base filter
     if (actor.role === "distributor") {
@@ -125,6 +129,10 @@ export class InventoryService {
     const countScopeClauses: string[] = [];
     const countScopeParams: unknown[] = [];
     let countParamIdx = 1;
+
+    countScopeClauses.push(`t.tenant_id = $${countParamIdx}`);
+    countScopeParams.push(actor.tenantId);
+    countParamIdx++;
 
     if (actor.role === "distributor") {
       countScopeClauses.push(

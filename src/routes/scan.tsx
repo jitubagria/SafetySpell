@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Phone, ShieldAlert } from "lucide-react";
 import { z } from "zod";
 import { Button } from "@/components/ui/button";
+import { ConditionFlags } from "@/components/condition-flags";
 import { DemoGate } from "@/components/demo-gate";
 import { coreApiUrl, scanTag } from "@/lib/core-api";
 
@@ -141,17 +142,22 @@ function ScanResult({
     <div className="mt-4">
       <dl className="mx-auto grid max-w-md gap-3">
         {result.fields.map((field) => {
-          const allergyLines =
-            field.key === "allergy" && typeof field.value === "string"
+          const noteLines =
+            (field.key === "allergy" || field.key === "condition_notes") &&
+            typeof field.value === "string"
               ? field.value.split("\n").filter((line) => line.trim().length > 0)
               : null;
           return (
             <div key={field.key} className="rounded-lg bg-category-soft px-4 py-3 text-center">
               <dt className="text-sm font-bold text-category">{field.label}</dt>
-              {allergyLines ? (
+              {field.key === "condition_flags" ? (
+                <dd>
+                  <ConditionFlags keys={field.value} />
+                </dd>
+              ) : noteLines ? (
                 <dd className="mt-1 flex justify-center">
                   <ul className="inline-block list-disc space-y-0.5 pl-5 text-left text-lg font-semibold">
-                    {allergyLines.map((line, index) => (
+                    {noteLines.map((line, index) => (
                       <li key={index}>{line}</li>
                     ))}
                   </ul>

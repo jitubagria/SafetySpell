@@ -10,11 +10,14 @@ import {
 import { ConfigService } from "@nestjs/config";
 import { Reflector } from "@nestjs/core";
 import * as jwt from "jsonwebtoken";
+import { DatabaseService } from "../database/database.service";
 
 export type ApiRole = "company_admin" | "guardian" | "staff" | "distributor";
 export interface AuthenticatedUser {
   id: string;
   role: ApiRole;
+  /** Set only by JwtAuthGuard after the live user-record validation. */
+  tenantId?: string;
 }
 export interface RequestWithUser {
   headers: Record<string, string | string[] | undefined>;
@@ -34,8 +37,11 @@ export const Roles = (...roles: ApiRole[]) => SetMetadata(ROLES_KEY, roles);
 
 @Injectable()
 export class JwtAuthGuard implements CanActivate {
-  constructor(private readonly config: ConfigService) {}
-  canActivate(context: ExecutionContext): boolean {
+  constructor(
+    private readonly config: ConfigService,
+    private readonly db: DatabaseService,
+  ) {}
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<RequestWithUser>();
     const header = request.headers.authorization;
     const token =
@@ -45,8 +51,18 @@ export class JwtAuthGuard implements CanActivate {
       const payload = jwt.verify(token, this.config.getOrThrow<string>("AUTH_JWT_SECRET")) as {
         sub: string;
         role: ApiRole;
+        tenantId?: string;
       };
-      request.user = { id: payload.sub, role: payload.role };
+      if (!payload.tenantId) throw new UnauthorizedException("Invalid authentication token");
+      const user = await this.db.query<{ id: string; role: ApiRole; tenant_id: string }>(
+        `SELECT id, role, tenant_id FROM users
+         WHERE id = $1 AND status = 'active' AND tenant_id = $2`,
+        [payload.sub, payload.tenantId],
+      );
+      const live = user.rows[0];
+      if (!live || live.role !== payload.role)
+        throw new UnauthorizedException("Invalid authentication token");
+      request.user = { id: live.id, role: live.role, tenantId: live.tenant_id };
       return true;
     } catch {
       throw new UnauthorizedException("Invalid authentication token");

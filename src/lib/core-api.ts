@@ -7,7 +7,13 @@ export interface ApiWard {
   status: string;
 }
 
-export type ApiFieldKey = "age_band" | "primary_language" | "blood_group" | "allergy";
+export type ApiFieldKey =
+  | "age_band"
+  | "primary_language"
+  | "blood_group"
+  | "allergy"
+  | "condition_flags"
+  | "condition_notes";
 
 export interface ApiGuardianField {
   catalogId: string;
@@ -111,7 +117,7 @@ export function writeField(
   token: string,
   wardId: string,
   catalogId: string,
-  value: string,
+  value: unknown,
 ): Promise<{ status: "updated" }> {
   return call(
     `/v1/app/wards/${wardId}/fields/${catalogId}`,
