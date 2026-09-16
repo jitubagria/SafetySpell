@@ -73,15 +73,20 @@ function endpoint(path: string): string {
 }
 
 async function call<T>(path: string, init: RequestInit = {}, token?: string): Promise<T> {
-  const response = await fetch(endpoint(path), {
-    ...init,
-    headers: {
-      Accept: "application/json",
-      ...(init.body ? { "Content-Type": "application/json" } : {}),
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...init.headers,
-    },
-  });
+  let response: Response;
+  try {
+    response = await fetch(endpoint(path), {
+      ...init,
+      headers: {
+        Accept: "application/json",
+        ...(init.body ? { "Content-Type": "application/json" } : {}),
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...init.headers,
+      },
+    });
+  } catch {
+    throw new CoreApiError("Could not reach the Core API. Check the connection and try again.", 0);
+  }
   const payload: unknown = await response.json().catch(() => undefined);
   if (!response.ok) {
     const message =
@@ -256,5 +261,233 @@ export function downloadAdminBatchPdf(token: string, batchId: string): Promise<B
   return downloadAdminArtifact(
     token,
     `/v1/admin/tag-batches/${encodeURIComponent(batchId)}/print.pdf`,
+  );
+}
+
+export type ApiTenantRoleAuthorityClass =
+  "unprivileged" | "operational_staff" | "guardian" | "admin";
+
+export interface ApiRouteConfigRoute {
+  id: string;
+  tenant_id: string;
+  name: string;
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+  stage_count?: number;
+  active_hop_count?: number;
+  strandedTagCount?: number;
+}
+
+export interface ApiRouteConfigStage {
+  id: string;
+  tenant_id: string;
+  route_id: string;
+  name: string;
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+  strandedTagCount?: number;
+}
+
+export interface ApiRouteConfigHop {
+  id: string;
+  tenant_id: string;
+  route_id: string;
+  from_stage_id: string;
+  from_stage_name?: string;
+  to_stage_id: string;
+  to_stage_name?: string;
+  allowed_tenant_role_id: string;
+  allowed_tenant_role_name?: string;
+  authority_class?: ApiTenantRoleAuthorityClass;
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApiTenantRole {
+  id: string;
+  tenant_id: string;
+  name: string;
+  authority_class: ApiTenantRoleAuthorityClass;
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApiRouteConfigDetail extends ApiRouteConfigRoute {
+  stages: ApiRouteConfigStage[];
+  hops: ApiRouteConfigHop[];
+}
+
+export interface CreateRouteInput {
+  name: string;
+}
+
+export interface UpdateRouteInput {
+  name?: string;
+  active?: boolean;
+}
+
+export interface CreateStageInput {
+  name: string;
+}
+
+export interface UpdateStageInput {
+  name?: string;
+  active?: boolean;
+}
+
+export interface CreateHopInput {
+  fromStageId: string;
+  toStageId: string;
+  allowedTenantRoleId: string;
+}
+
+export interface UpdateHopInput {
+  active: boolean;
+}
+
+export interface CreateTenantRoleInput {
+  name: string;
+  authorityClass: ApiTenantRoleAuthorityClass;
+}
+
+export interface UpdateTenantRoleInput {
+  name?: string;
+  active?: boolean;
+}
+
+export const routeConfigQueryKeys = {
+  routes: (token: string) => ["route-config", "routes", token] as const,
+  route: (token: string, routeId: string) => ["route-config", "route", token, routeId] as const,
+  stages: (token: string, routeId: string) => ["route-config", "stages", token, routeId] as const,
+  hops: (token: string, routeId: string) => ["route-config", "hops", token, routeId] as const,
+  tenantRoles: (token: string) => ["route-config", "tenant-roles", token] as const,
+};
+
+export function createRouteConfigRoute(
+  token: string,
+  input: CreateRouteInput,
+): Promise<ApiRouteConfigRoute> {
+  return call<ApiRouteConfigRoute>(
+    "/v1/admin/routes",
+    { method: "POST", body: JSON.stringify(input) },
+    token,
+  );
+}
+
+export function listRouteConfigRoutes(token: string): Promise<ApiRouteConfigRoute[]> {
+  return call<ApiRouteConfigRoute[]>("/v1/admin/routes", {}, token);
+}
+
+export function getRouteConfigRoute(token: string, routeId: string): Promise<ApiRouteConfigDetail> {
+  return call<ApiRouteConfigDetail>(`/v1/admin/routes/${encodeURIComponent(routeId)}`, {}, token);
+}
+
+export function updateRouteConfigRoute(
+  token: string,
+  routeId: string,
+  input: UpdateRouteInput,
+): Promise<ApiRouteConfigRoute> {
+  return call<ApiRouteConfigRoute>(
+    `/v1/admin/routes/${encodeURIComponent(routeId)}`,
+    { method: "PATCH", body: JSON.stringify(input) },
+    token,
+  );
+}
+
+export function createRouteConfigStage(
+  token: string,
+  routeId: string,
+  input: CreateStageInput,
+): Promise<ApiRouteConfigStage> {
+  return call<ApiRouteConfigStage>(
+    `/v1/admin/routes/${encodeURIComponent(routeId)}/stages`,
+    { method: "POST", body: JSON.stringify(input) },
+    token,
+  );
+}
+
+export function listRouteConfigStages(
+  token: string,
+  routeId: string,
+): Promise<ApiRouteConfigStage[]> {
+  return call<ApiRouteConfigStage[]>(
+    `/v1/admin/routes/${encodeURIComponent(routeId)}/stages`,
+    {},
+    token,
+  );
+}
+
+export function updateRouteConfigStage(
+  token: string,
+  stageId: string,
+  input: UpdateStageInput,
+): Promise<ApiRouteConfigStage> {
+  return call<ApiRouteConfigStage>(
+    `/v1/admin/stages/${encodeURIComponent(stageId)}`,
+    { method: "PATCH", body: JSON.stringify(input) },
+    token,
+  );
+}
+
+export function createRouteConfigHop(
+  token: string,
+  routeId: string,
+  input: CreateHopInput,
+): Promise<ApiRouteConfigHop> {
+  return call<ApiRouteConfigHop>(
+    `/v1/admin/routes/${encodeURIComponent(routeId)}/hops`,
+    { method: "POST", body: JSON.stringify(input) },
+    token,
+  );
+}
+
+export function listRouteConfigHops(token: string, routeId: string): Promise<ApiRouteConfigHop[]> {
+  return call<ApiRouteConfigHop[]>(
+    `/v1/admin/routes/${encodeURIComponent(routeId)}/hops`,
+    {},
+    token,
+  );
+}
+
+export function updateRouteConfigHop(
+  token: string,
+  hopId: string,
+  input: UpdateHopInput,
+): Promise<ApiRouteConfigHop> {
+  return call<ApiRouteConfigHop>(
+    `/v1/admin/hops/${encodeURIComponent(hopId)}`,
+    { method: "PATCH", body: JSON.stringify(input) },
+    token,
+  );
+}
+
+export function createRouteConfigTenantRole(
+  token: string,
+  input: CreateTenantRoleInput,
+): Promise<ApiTenantRole> {
+  return call<ApiTenantRole>(
+    "/v1/admin/tenant-roles",
+    { method: "POST", body: JSON.stringify(input) },
+    token,
+  );
+}
+
+export function listRouteConfigTenantRoles(token: string): Promise<ApiTenantRole[]> {
+  return call<ApiTenantRole[]>("/v1/admin/tenant-roles", {}, token);
+}
+
+export function updateRouteConfigTenantRole(
+  token: string,
+  roleId: string,
+  input: UpdateTenantRoleInput,
+): Promise<ApiTenantRole> {
+  return call<ApiTenantRole>(
+    `/v1/admin/tenant-roles/${encodeURIComponent(roleId)}`,
+    { method: "PATCH", body: JSON.stringify(input) },
+    token,
   );
 }

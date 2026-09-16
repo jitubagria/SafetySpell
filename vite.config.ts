@@ -9,6 +9,16 @@ import { VitePWA } from "vite-plugin-pwa";
 
 export default defineConfig({
   vite: {
+    server: {
+      // Keep browser-based local verification same-origin. The frontend still calls the real Core
+      // API; Vite only forwards /v1 during development and is not part of a production build.
+      proxy: {
+        "/v1": {
+          target: process.env.VITE_CORE_API_PROXY_TARGET ?? "http://localhost:3001",
+          changeOrigin: true,
+        },
+      },
+    },
     plugins: [
       VitePWA({
         // TanStack Start emits the browser app to .output/public. Point Workbox at
