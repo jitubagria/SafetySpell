@@ -6,7 +6,7 @@ describe("Phase 6 Slice 2: Database Role Hardening & Append-Only Privilege Enfor
   const adminDbUrl =
     process.env.INTEGRATION_DATABASE_URL ??
     process.env.DATABASE_URL ??
-    "postgres://postgres:postgres@localhost:5433/safetyspell_integration";
+    "postgres://postgres:postgres@localhost:5432/safetyspell_integration";
 
   // Build app role connection string by replacing user and password with safetyspell_app credentials
   const appDbUrl = adminDbUrl.replace(

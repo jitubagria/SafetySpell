@@ -13,7 +13,7 @@ import { createPublicTagCode } from "../src/domain/tag-code";
 process.env.DATABASE_URL =
   process.env.DATABASE_URL ??
   process.env.INTEGRATION_DATABASE_URL ??
-  "postgres://postgres:postgres@localhost:5433/safetyspell_integration";
+  "postgres://postgres:postgres@localhost:5432/safetyspell_integration";
 
 describe("Phase 6 Slice 1: Shared Throttler & Trusted-Proxy IP Resolution", () => {
   let sharedRedisMock: Redis;

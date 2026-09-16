@@ -8,7 +8,7 @@ describe("Step 2 tenant boundary and category-integrity schema", () => {
   const adminDbUrl =
     process.env.INTEGRATION_DATABASE_URL ??
     process.env.DATABASE_URL ??
-    "postgres://postgres:postgres@localhost:5433/safetyspell_integration";
+    "postgres://postgres:postgres@localhost:5432/safetyspell_integration";
   const appDbUrl = adminDbUrl.replace(
     /postgres:\/\/[^@]+@/,
     "postgres://safetyspell_app:safetyspell_app_password@",
