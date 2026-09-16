@@ -319,15 +319,13 @@ describe("Step 2 tenant boundary and category-integrity schema", () => {
         [canonicalActiveTagId, createPublicTagCode()],
       );
 
+      const sortedIds = [legacyActiveTagId, canonicalActiveTagId].sort();
       await expect(
         rehearsalPool.query(
           await readFile(join(migrationDirectory, "022_canonical_tag_lifecycle.sql"), "utf8"),
         ),
       ).rejects.toThrow(
-        new RegExp(
-          `tag lifecycle parity failed.*${legacyActiveTagId}.*${canonicalActiveTagId}`,
-          "s",
-        ),
+        new RegExp(`tag lifecycle parity failed.*${sortedIds[0]}.*${sortedIds[1]}`, "s"),
       );
     } finally {
       await rehearsalPool.end();

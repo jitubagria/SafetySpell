@@ -589,6 +589,31 @@ describe("Rescue ID live PostgreSQL integration boundary", () => {
     ).resolves.toMatchObject({ rows: [{ inventory_status: "lost", status: "lost" }] });
   });
 
+  it("proves a forced-past divergent row with legacy status=active and canonical inventory_status!=active never resolves publicly", async () => {
+    const data = await seed({ visibility: "public" });
+    // Force a divergent state by temporarily disabling the mirror trigger and setting status='active' while inventory_status='lost'
+    await db.query("ALTER TABLE tags DISABLE TRIGGER tags_status_mirror_from_inventory");
+    try {
+      await db.query(
+        "UPDATE tags SET inventory_status = 'lost', status = 'active' WHERE code = $1",
+        [data.tagCode],
+      );
+      const checkRow = await db.query("SELECT inventory_status, status FROM tags WHERE code = $1", [
+        data.tagCode,
+      ]);
+      expect(checkRow.rows[0]).toEqual({ inventory_status: "lost", status: "active" });
+
+      // Public scan must resolve ONLY on canonical inventory_status and return neutral tag_unavailable despite legacy status='active'
+      const scan = await request(app.getHttpServer())
+        .get(`/v1/public/scan/${data.tagCode}`)
+        .set("X-Forwarded-For", "198.51.100.33")
+        .expect(200);
+      expect(scan.body).toEqual({ status: "tag_unavailable" });
+    } finally {
+      await db.query("ALTER TABLE tags ENABLE TRIGGER tags_status_mirror_from_inventory");
+    }
+  });
+
   it("allows only allergy and condition_notes to use bounded public free text at the database layer", async () => {
     // These two owner/policy-cleared exceptions remain bounded public text.
     await expect(
