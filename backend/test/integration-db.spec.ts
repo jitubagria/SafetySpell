@@ -2912,4 +2912,360 @@ describe("Rescue ID live PostgreSQL integration boundary", () => {
       ).rejects.toThrow(/must not change inventory lifecycle status/);
     });
   });
+
+  describe("Step 6 route/stage/role admin configuration", () => {
+    async function seedAdminFixture(tenantId = "00000000-0000-4000-8000-000000000021") {
+      const adminId = randomUUID();
+      const password = "admin-stage-password";
+      const email = `admin-${adminId}@example.test`;
+      await db.query(
+        `INSERT INTO users(id, name, email, password_hash, role, tenant_id)
+         VALUES($1, 'Company Admin', $2, $3, 'company_admin', $4)`,
+        [adminId, email, await bcrypt.hash(password, 4), tenantId],
+      );
+      const token = await tokenForCredentials(email, password);
+      return { tenantId, adminId, token };
+    }
+
+    it("full CRUD lifecycle for routes, stages, hops, and tenant roles", async () => {
+      const admin = await seedAdminFixture();
+
+      // 1. Create Route
+      const routeRes = await request(app.getHttpServer())
+        .post("/v1/admin/routes")
+        .set("Authorization", `Bearer ${admin.token}`)
+        .send({ name: "Emergency Admission" })
+        .expect(201);
+      expect(routeRes.body).toMatchObject({
+        name: "Emergency Admission",
+        active: true,
+        tenant_id: admin.tenantId,
+      });
+      const routeId = routeRes.body.id;
+
+      // 2. Create Stages
+      const triageRes = await request(app.getHttpServer())
+        .post(`/v1/admin/routes/${routeId}/stages`)
+        .set("Authorization", `Bearer ${admin.token}`)
+        .send({ name: "Triage" })
+        .expect(201);
+      const icuRes = await request(app.getHttpServer())
+        .post(`/v1/admin/routes/${routeId}/stages`)
+        .set("Authorization", `Bearer ${admin.token}`)
+        .send({ name: "ICU" })
+        .expect(201);
+      expect(triageRes.body.name).toBe("Triage");
+      expect(icuRes.body.name).toBe("ICU");
+
+      // 3. Create Tenant Role
+      const roleRes = await request(app.getHttpServer())
+        .post("/v1/admin/tenant-roles")
+        .set("Authorization", `Bearer ${admin.token}`)
+        .send({ name: "Triage Nurse", authorityClass: "operational_staff" })
+        .expect(201);
+      expect(roleRes.body).toMatchObject({
+        name: "Triage Nurse",
+        authority_class: "operational_staff",
+        active: true,
+      });
+      const roleId = roleRes.body.id;
+
+      // 4. Create Hop
+      const hopRes = await request(app.getHttpServer())
+        .post(`/v1/admin/routes/${routeId}/hops`)
+        .set("Authorization", `Bearer ${admin.token}`)
+        .send({
+          fromStageId: triageRes.body.id,
+          toStageId: icuRes.body.id,
+          allowedTenantRoleId: roleId,
+        })
+        .expect(201);
+      expect(hopRes.body).toMatchObject({
+        route_id: routeId,
+        from_stage_id: triageRes.body.id,
+        to_stage_id: icuRes.body.id,
+        allowed_tenant_role_id: roleId,
+        active: true,
+      });
+      const hopId = hopRes.body.id;
+
+      // 5. List and Get Route
+      const listRes = await request(app.getHttpServer())
+        .get("/v1/admin/routes")
+        .set("Authorization", `Bearer ${admin.token}`)
+        .expect(200);
+      expect(listRes.body).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: routeId,
+            name: "Emergency Admission",
+            stage_count: 2,
+            active_hop_count: 1,
+          }),
+        ]),
+      );
+
+      const getRes = await request(app.getHttpServer())
+        .get(`/v1/admin/routes/${routeId}`)
+        .set("Authorization", `Bearer ${admin.token}`)
+        .expect(200);
+      expect(getRes.body.stages.length).toBe(2);
+      expect(getRes.body.hops.length).toBe(1);
+      expect(getRes.body.hops[0]).toMatchObject({
+        from_stage_name: "Triage",
+        to_stage_name: "ICU",
+        allowed_tenant_role_name: "Triage Nurse",
+      });
+
+      // 6. Update Route and Stage names
+      await request(app.getHttpServer())
+        .patch(`/v1/admin/routes/${routeId}`)
+        .set("Authorization", `Bearer ${admin.token}`)
+        .send({ name: "Urgent Admission" })
+        .expect(200)
+        .expect((res) => expect(res.body.name).toBe("Urgent Admission"));
+
+      await request(app.getHttpServer())
+        .patch(`/v1/admin/stages/${triageRes.body.id}`)
+        .set("Authorization", `Bearer ${admin.token}`)
+        .send({ name: "Initial Triage" })
+        .expect(200)
+        .expect((res) => expect(res.body.name).toBe("Initial Triage"));
+
+      // 7. Update Hop
+      await request(app.getHttpServer())
+        .patch(`/v1/admin/hops/${hopId}`)
+        .set("Authorization", `Bearer ${admin.token}`)
+        .send({ active: false })
+        .expect(200)
+        .expect((res) => expect(res.body.active).toBe(false));
+
+      // 8. Assign user tenant role
+      const staffUserId = randomUUID();
+      await db.query(
+        `INSERT INTO users(id, name, email, password_hash, role, tenant_id)
+         VALUES($1, 'Staff User', $2, 'hash', 'staff', $3)`,
+        [staffUserId, `${staffUserId}@example.test`, admin.tenantId],
+      );
+      const assignRes = await request(app.getHttpServer())
+        .patch(`/v1/admin/users/${staffUserId}/tenant-role`)
+        .set("Authorization", `Bearer ${admin.token}`)
+        .send({ tenantRoleId: roleId })
+        .expect(200);
+      expect(assignRes.body.tenant_role_id).toBe(roleId);
+    });
+
+    it("enforces role and cross-tenant boundaries with exact 403 vs 404 distinction", async () => {
+      const adminA = await seedAdminFixture();
+      const tenantBId = (
+        await db.query<{ id: string }>(
+          "INSERT INTO tenants(name, type) VALUES($1, 'hospital') RETURNING id",
+          [`Tenant B ${randomUUID()}`],
+        )
+      ).rows[0]!.id;
+      const adminB = await seedAdminFixture(tenantBId);
+
+      // Create Route in Tenant A
+      const routeA = (
+        await request(app.getHttpServer())
+          .post("/v1/admin/routes")
+          .set("Authorization", `Bearer ${adminA.token}`)
+          .send({ name: "Route A" })
+          .expect(201)
+      ).body;
+
+      // Staff and Guardian in Tenant A
+      const staffId = randomUUID();
+      const guardianId = randomUUID();
+      const staffEmail = `staff-${staffId}@example.test`;
+      const guardianEmail = `guardian-${guardianId}@example.test`;
+      const password = "role-test-password";
+      const pwHash = await bcrypt.hash(password, 4);
+      await db.query(
+        `INSERT INTO users(id, name, email, password_hash, role, tenant_id)
+         VALUES($1, 'Staff A', $2, $4, 'staff', $5), ($3, 'Guardian A', $6, $4, 'guardian', $5)`,
+        [staffId, staffEmail, guardianId, pwHash, adminA.tenantId, guardianEmail],
+      );
+      const staffToken = await tokenForCredentials(staffEmail, password);
+      const guardianToken = await tokenForCredentials(guardianEmail, password);
+
+      // 1. Staff and Guardian hitting admin endpoint get 403 (wrong role in own tenant)
+      await request(app.getHttpServer())
+        .get("/v1/admin/routes")
+        .set("Authorization", `Bearer ${staffToken}`)
+        .expect(403);
+      await request(app.getHttpServer())
+        .get("/v1/admin/routes")
+        .set("Authorization", `Bearer ${guardianToken}`)
+        .expect(403);
+
+      // 2. Admin B hitting Tenant A route gets 404 (cross-tenant anti-enumeration)
+      await request(app.getHttpServer())
+        .get(`/v1/admin/routes/${routeA.id}`)
+        .set("Authorization", `Bearer ${adminB.token}`)
+        .expect(404);
+      await request(app.getHttpServer())
+        .patch(`/v1/admin/routes/${routeA.id}`)
+        .set("Authorization", `Bearer ${adminB.token}`)
+        .send({ name: "Hijacked Route" })
+        .expect(404);
+      await request(app.getHttpServer())
+        .post(`/v1/admin/routes/${routeA.id}/stages`)
+        .set("Authorization", `Bearer ${adminB.token}`)
+        .send({ name: "Infiltrate Stage" })
+        .expect(404);
+    });
+
+    it("surfaces clean 400 and 409 errors for domain and constraint conflicts", async () => {
+      const admin = await seedAdminFixture();
+
+      // Duplicate route name -> 409
+      await request(app.getHttpServer())
+        .post("/v1/admin/routes")
+        .set("Authorization", `Bearer ${admin.token}`)
+        .send({ name: "Pediatrics" })
+        .expect(201);
+      const dupRoute = await request(app.getHttpServer())
+        .post("/v1/admin/routes")
+        .set("Authorization", `Bearer ${admin.token}`)
+        .send({ name: "Pediatrics" })
+        .expect(409);
+      expect(dupRoute.body.message).toMatch(/already exists/i);
+
+      // Duplicate stage name on same route -> 409
+      const route = (
+        await request(app.getHttpServer())
+          .post("/v1/admin/routes")
+          .set("Authorization", `Bearer ${admin.token}`)
+          .send({ name: "Cardiology" })
+          .expect(201)
+      ).body;
+      const stage1 = (
+        await request(app.getHttpServer())
+          .post(`/v1/admin/routes/${route.id}/stages`)
+          .set("Authorization", `Bearer ${admin.token}`)
+          .send({ name: "ECG Room" })
+          .expect(201)
+      ).body;
+      await request(app.getHttpServer())
+        .post(`/v1/admin/routes/${route.id}/stages`)
+        .set("Authorization", `Bearer ${admin.token}`)
+        .send({ name: "ECG Room" })
+        .expect(409);
+
+      // Hop fromStage === toStage -> 400
+      const sameHop = await request(app.getHttpServer())
+        .post(`/v1/admin/routes/${route.id}/hops`)
+        .set("Authorization", `Bearer ${admin.token}`)
+        .send({
+          fromStageId: stage1.id,
+          toStageId: stage1.id,
+          allowedTenantRoleId: randomUUID(),
+        })
+        .expect(400);
+      expect(sameHop.body.message).toMatch(/distinct stages/i);
+
+      // Duplicate case-insensitive role name -> 409
+      await request(app.getHttpServer())
+        .post("/v1/admin/tenant-roles")
+        .set("Authorization", `Bearer ${admin.token}`)
+        .send({ name: "Surgeon", authorityClass: "operational_staff" })
+        .expect(201);
+      await request(app.getHttpServer())
+        .post("/v1/admin/tenant-roles")
+        .set("Authorization", `Bearer ${admin.token}`)
+        .send({ name: "surgeon", authorityClass: "operational_staff" })
+        .expect(409);
+
+      // User role assignment coarse-role mismatch -> clean 400
+      const guardianUserId = randomUUID();
+      await db.query(
+        `INSERT INTO users(id, name, email, password_hash, role, tenant_id)
+         VALUES($1, 'Guardian Person', $2, 'hash', 'guardian', $3)`,
+        [guardianUserId, `${guardianUserId}@example.test`, admin.tenantId],
+      );
+      const staffRole = (
+        await request(app.getHttpServer())
+          .post("/v1/admin/tenant-roles")
+          .set("Authorization", `Bearer ${admin.token}`)
+          .send({ name: "OR Tech", authorityClass: "operational_staff" })
+          .expect(201)
+      ).body;
+
+      const mismatch = await request(app.getHttpServer())
+        .patch(`/v1/admin/users/${guardianUserId}/tenant-role`)
+        .set("Authorization", `Bearer ${admin.token}`)
+        .send({ tenantRoleId: staffRole.id })
+        .expect(400);
+      expect(mismatch.body.message).toMatch(
+        /operational_staff tenant roles require users.role = staff/,
+      );
+    });
+
+    it("retires stage with stranded-tag count, cascade-deactivates hops, and blocks future stage moves", async () => {
+      const fixture = await seedStageMoveFixture();
+      const admin = await seedAdminFixture(fixture.tenantId);
+
+      // Confirm legitimate move works before retirement
+      await stageMoveRequest(fixture).expect(201);
+
+      // Tag is now at fixture.toStageId
+      const tagCheck = await db.query<{ current_stage_id: string }>(
+        "SELECT current_stage_id FROM tags WHERE id = $1",
+        [fixture.tagId],
+      );
+      expect(tagCheck.rows[0]?.current_stage_id).toBe(fixture.toStageId);
+
+      // Add another tag to fixture.toStageId
+      const extraTagId = randomUUID();
+      await db.query(
+        `INSERT INTO tags(
+           id, code, category, category_id, form, inventory_status, holder_kind, current_stage_id, tenant_id
+         ) VALUES(
+           $1, 'SS-BKST-9999', 'medical', (SELECT id FROM categories WHERE key = 'medical'), 'band', 'active', 'company', $2, $3
+         )`,
+        [extraTagId, fixture.toStageId, fixture.tenantId],
+      );
+
+      // Admin retires fixture.toStageId (where 2 tags now sit)
+      const retireRes = await request(app.getHttpServer())
+        .patch(`/v1/admin/stages/${fixture.toStageId}`)
+        .set("Authorization", `Bearer ${admin.token}`)
+        .send({ active: false })
+        .expect(200);
+
+      expect(retireRes.body).toMatchObject({
+        id: fixture.toStageId,
+        active: false,
+        strandedTagCount: 2,
+      });
+
+      // Confirm dependent hops were cascade-deactivated in DB (not deleted)
+      const hops = await db.query<{ active: boolean }>(
+        `SELECT active FROM route_stage_hop_permissions
+         WHERE tenant_id = $1 AND (from_stage_id = $2 OR to_stage_id = $2)`,
+        [fixture.tenantId, fixture.toStageId],
+      );
+      expect(hops.rows.length).toBeGreaterThan(0);
+      expect(hops.rows.every((h) => h.active === false)).toBe(true);
+
+      // Moving into the retired stage with a new tag at active fromStageId now fails with 403
+      const activeTag = await seedStageMoveFixture({ tenantId: fixture.tenantId });
+      // Update hop permission to point to the newly retired stage
+      await stageMoveRequest(activeTag, {
+        fromStageId: activeTag.fromStageId,
+        toStageId: fixture.toStageId,
+      }).expect(403);
+
+      // Moving the stranded tag out of the retired stage also fails with 403
+      await request(app.getHttpServer())
+        .post(`/v1/app/tags/${fixture.tagCode}/stage-moves`)
+        .set("Authorization", `Bearer ${fixture.token}`)
+        .send({
+          fromStageId: fixture.toStageId,
+          toStageId: fixture.fromStageId,
+        })
+        .expect(403);
+    });
+  });
 });
