@@ -206,6 +206,7 @@ beforeAll(async () => {
     "021_tenant_boundary_and_category_integrity.sql",
     "022_canonical_tag_lifecycle.sql",
     "023_asset_subject_and_public_projection.sql",
+    "024_route_stage_tenant_roles_and_hop_authority.sql",
   ]);
   const conditionFields = await db.query(
     "SELECT field_key, validation_policy FROM field_catalog WHERE category = 'medical' AND field_key IN ('condition_flags', 'condition_notes') ORDER BY field_key",
