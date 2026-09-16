@@ -1,6 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import { FormEvent, useEffect, useState } from "react";
+import { RouteConfigBuilder } from "@/components/route-config-builder";
 import { DemoGate } from "@/components/demo-gate";
 import { Button } from "@/components/ui/button";
 import {
@@ -8,10 +9,7 @@ import {
   createTagBatch,
   downloadAdminBatchPdf,
   downloadAdminTagPng,
-  listRouteConfigRoutes,
-  listRouteConfigTenantRoles,
   login,
-  routeConfigQueryKeys,
   type ApiTagBatch,
 } from "@/lib/core-api";
 
@@ -172,88 +170,7 @@ function RouteConfigConnection({
   token: string;
   onReauthenticate: () => void;
 }) {
-  const routes = useQuery({
-    queryKey: routeConfigQueryKeys.routes(token),
-    queryFn: () => listRouteConfigRoutes(token),
-    retry: false,
-  });
-  const tenantRoles = useQuery({
-    queryKey: routeConfigQueryKeys.tenantRoles(token),
-    queryFn: () => listRouteConfigTenantRoles(token),
-    retry: false,
-  });
-  const errors = [routes.error, tenantRoles.error].filter((error): error is Error =>
-    Boolean(error),
-  );
-  const uniqueErrors = Array.from(new Map(errors.map((error) => [error.message, error])).values());
-  const unauthorized = errors.some(
-    (error) => error instanceof CoreApiError && error.status === 401,
-  );
-  const forbidden = errors.some((error) => error instanceof CoreApiError && error.status === 403);
-
-  return (
-    <section className="mt-6 rounded-lg border p-5" aria-labelledby="route-config-title">
-      <h2 id="route-config-title" className="text-xl font-bold">
-        Route configuration connection
-      </h2>
-      <p className="mt-2 text-sm text-muted-foreground">
-        Slice A verifies live configuration reads only. Route, stage, hop, and role forms arrive in
-        Slice B; no configuration can be changed from this panel.
-      </p>
-      {routes.isPending || tenantRoles.isPending ? (
-        <p className="mt-4 text-sm text-muted-foreground">Loading live admin configuration…</p>
-      ) : null}
-      {uniqueErrors.map((error) => (
-        <div key={error.message} className="mt-4 rounded-md border border-destructive/40 p-3">
-          <p className="text-sm font-semibold text-destructive">{adminErrorMessage(error)}</p>
-          <div className="mt-3 flex flex-wrap gap-2">
-            {unauthorized ? (
-              <Button type="button" size="sm" onClick={onReauthenticate}>
-                Sign in again
-              </Button>
-            ) : (
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                onClick={() => {
-                  void routes.refetch();
-                  void tenantRoles.refetch();
-                }}
-              >
-                Retry live request
-              </Button>
-            )}
-          </div>
-        </div>
-      ))}
-      {!errors.length && !routes.isPending && !tenantRoles.isPending ? (
-        <div className="mt-4 grid gap-3 sm:grid-cols-2">
-          <div className="rounded-md bg-muted p-3">
-            <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-              Routes
-            </p>
-            <p className="mt-1 text-2xl font-bold">{routes.data?.length ?? 0}</p>
-            <p className="text-sm text-muted-foreground">
-              {routes.data?.length ? "Live server response loaded." : "No routes configured yet."}
-            </p>
-          </div>
-          <div className="rounded-md bg-muted p-3">
-            <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-              Tenant roles
-            </p>
-            <p className="mt-1 text-2xl font-bold">{tenantRoles.data?.length ?? 0}</p>
-            <p className="text-sm text-muted-foreground">Live server response loaded.</p>
-          </div>
-        </div>
-      ) : null}
-      {forbidden ? (
-        <p className="mt-4 text-sm text-muted-foreground">
-          The backend denied this request. No route or tenant-role data is shown.
-        </p>
-      ) : null}
-    </section>
-  );
+  return <RouteConfigBuilder token={token} onReauthenticate={onReauthenticate} />;
 }
 
 function TagBatchPanel({ token }: { token: string }) {
