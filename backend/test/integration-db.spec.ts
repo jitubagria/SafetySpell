@@ -38,6 +38,10 @@ const testTables = [
   "tag_events",
   "tags",
   "assets",
+  "route_stage_hop_permissions",
+  "stages",
+  "routes",
+  "tenant_roles",
   "tag_batches",
   "distributor_allowed_categories",
   "distributors",
@@ -173,6 +177,146 @@ async function tokenForCredentials(email: string, password: string): Promise<str
     .send({ email, password })
     .expect(201);
   return response.body.accessToken as string;
+}
+
+type StageMoveFixtureOptions = {
+  tenantId?: string;
+  tenantRole?: "none" | "operational_staff" | "unprivileged";
+  tenantRoleActive?: boolean;
+  hopActive?: boolean;
+  routeActive?: boolean;
+  fromStageActive?: boolean;
+  toStageActive?: boolean;
+  holderKind?: "company" | "distributor" | "guardian";
+  currentStageId?: string | null;
+};
+
+type StageMoveFixture = {
+  tenantId: string;
+  actorId: string;
+  token: string;
+  tagId: string;
+  tagCode: string;
+  routeId: string;
+  fromStageId: string;
+  toStageId: string;
+  tenantRoleId: string | null;
+};
+
+async function seedStageMoveFixture(
+  options: StageMoveFixtureOptions = {},
+): Promise<StageMoveFixture> {
+  const tenantId = options.tenantId ?? "00000000-0000-4000-8000-000000000021";
+  const actorId = randomUUID();
+  const tenantRoleId = options.tenantRole === "none" ? null : randomUUID();
+  const routeId = randomUUID();
+  const fromStageId = randomUUID();
+  const toStageId = randomUUID();
+  const tagId = randomUUID();
+  const tagCode = randomUUID().replaceAll("-", "");
+  const password = "staff-stage-password";
+  const email = `${actorId}@example.test`;
+
+  if (tenantRoleId) {
+    await db.query(
+      `INSERT INTO tenant_roles(id, tenant_id, name, authority_class, active)
+       VALUES($1, $2, $3, $4, $5)`,
+      [
+        tenantRoleId,
+        tenantId,
+        `Stage role ${tenantRoleId}`,
+        options.tenantRole ?? "operational_staff",
+        options.tenantRoleActive ?? true,
+      ],
+    );
+  }
+  await db.query(
+    `INSERT INTO users(id, name, email, password_hash, role, tenant_id, tenant_role_id)
+     VALUES($1, 'Stage staff', $2, $3, 'staff', $4, $5)`,
+    [actorId, email, await bcrypt.hash(password, 4), tenantId, tenantRoleId],
+  );
+  await db.query("INSERT INTO routes(id, tenant_id, name, active) VALUES($1, $2, $3, $4)", [
+    routeId,
+    tenantId,
+    `Route ${routeId}`,
+    options.routeActive ?? true,
+  ]);
+  await db.query(
+    `INSERT INTO stages(id, tenant_id, route_id, name, active)
+     VALUES($1, $2, $3, 'From', $4), ($5, $2, $3, 'To', $6)`,
+    [
+      fromStageId,
+      tenantId,
+      routeId,
+      options.fromStageActive ?? true,
+      toStageId,
+      options.toStageActive ?? true,
+    ],
+  );
+  if (tenantRoleId) {
+    await db.query(
+      `INSERT INTO route_stage_hop_permissions(
+         tenant_id, route_id, from_stage_id, to_stage_id, allowed_tenant_role_id, active
+       ) VALUES($1, $2, $3, $4, $5, $6)`,
+      [tenantId, routeId, fromStageId, toStageId, tenantRoleId, options.hopActive ?? true],
+    );
+  }
+
+  const holderKind = options.holderKind ?? "company";
+  let holderDistributorId: string | null = null;
+  let holderGuardianUserId: string | null = null;
+  if (holderKind === "distributor") {
+    holderDistributorId = randomUUID();
+    await db.query("INSERT INTO distributors(id, name) VALUES($1, $2)", [
+      holderDistributorId,
+      `Stage distributor ${holderDistributorId}`,
+    ]);
+  }
+  if (holderKind === "guardian") {
+    holderGuardianUserId = randomUUID();
+    await db.query(
+      `INSERT INTO users(id, name, email, password_hash, role, tenant_id)
+       VALUES($1, 'Stage guardian', $2, 'hash', 'guardian', $3)`,
+      [holderGuardianUserId, `${holderGuardianUserId}@example.test`, tenantId],
+    );
+  }
+  await db.query(
+    `INSERT INTO tags(
+       id, code, category, category_id, form, inventory_status, holder_kind,
+       holder_distributor_id, holder_guardian_user_id, current_stage_id, tenant_id, activated_at
+     ) VALUES(
+       $1, $2, 'medical', (SELECT id FROM categories WHERE key = 'medical'), 'band', 'active',
+       $3, $4, $5, $6, $7, now()
+     )`,
+    [
+      tagId,
+      tagCode,
+      holderKind,
+      holderDistributorId,
+      holderGuardianUserId,
+      options.currentStageId === undefined ? fromStageId : options.currentStageId,
+      tenantId,
+    ],
+  );
+
+  return {
+    tenantId,
+    actorId,
+    token: await tokenForCredentials(email, password),
+    tagId,
+    tagCode,
+    routeId,
+    fromStageId,
+    toStageId,
+    tenantRoleId,
+  };
+}
+
+function stageMoveRequest(fixture: StageMoveFixture, body?: Record<string, unknown>) {
+  return request(app.getHttpServer())
+    .post(`/v1/app/tags/${fixture.tagCode}/stage-moves`)
+    .set("Authorization", `Bearer ${fixture.token}`)
+    .send(body ?? { fromStageId: fixture.fromStageId, toStageId: fixture.toStageId });
 }
 
 async function tokenFor(seedData: Seed): Promise<string> {
@@ -2532,5 +2676,239 @@ describe("Rescue ID live PostgreSQL integration boundary", () => {
       unknown.body,
     ]);
     expect(unknown.body).toEqual({ status: "tag_unavailable" });
+  });
+
+  describe("Step 6 stage-move authority", () => {
+    async function expectUnmoved(fixture: StageMoveFixture) {
+      await expect(
+        db.query("SELECT current_stage_id FROM tags WHERE id = $1", [fixture.tagId]),
+      ).resolves.toMatchObject({ rows: [{ current_stage_id: fixture.fromStageId }] });
+      await expect(
+        db.query(
+          "SELECT count(*)::int AS count FROM tag_events WHERE tag_id = $1 AND event_type = 'stage_moved'",
+          [fixture.tagId],
+        ),
+      ).resolves.toMatchObject({ rows: [{ count: 0 }] });
+    }
+
+    it("stage-move preserves lifecycle while moving a company-held tag and writes one immutable event", async () => {
+      const fixture = await seedStageMoveFixture();
+
+      const moved = await stageMoveRequest(fixture).expect(201);
+      expect(moved.body).toMatchObject({
+        success: true,
+        code: fixture.tagCode,
+        fromStageId: fixture.fromStageId,
+        toStageId: fixture.toStageId,
+      });
+
+      await expect(
+        db.query(
+          "SELECT current_stage_id, inventory_status, status, activated_at FROM tags WHERE id = $1",
+          [fixture.tagId],
+        ),
+      ).resolves.toMatchObject({
+        rows: [
+          expect.objectContaining({
+            current_stage_id: fixture.toStageId,
+            inventory_status: "active",
+            status: "active",
+            activated_at: expect.any(Date),
+          }),
+        ],
+      });
+      const event = await db.query(
+        `SELECT id, event_type, actor_user_id, from_status, to_status, from_stage_id, to_stage_id, metadata
+         FROM tag_events WHERE tag_id = $1 AND event_type = 'stage_moved'`,
+        [fixture.tagId],
+      );
+      expect(event.rows).toEqual([
+        {
+          id: moved.body.eventId,
+          event_type: "stage_moved",
+          actor_user_id: fixture.actorId,
+          from_status: "active",
+          to_status: "active",
+          from_stage_id: fixture.fromStageId,
+          to_stage_id: fixture.toStageId,
+          metadata: { method: "staff_hop" },
+        },
+      ]);
+      await expect(
+        db.query("UPDATE tag_events SET metadata = '{}'::jsonb WHERE id = $1", [
+          moved.body.eventId,
+        ]),
+      ).rejects.toThrow(/append-only/);
+    });
+
+    it("stage-move rejects a staff user with no tenant role", async () => {
+      const fixture = await seedStageMoveFixture({ tenantRole: "none" });
+      await stageMoveRequest(fixture).expect(403);
+      await expectUnmoved(fixture);
+    });
+
+    it("stage-move rejects an inactive tenant role", async () => {
+      const fixture = await seedStageMoveFixture({ tenantRoleActive: false });
+      await stageMoveRequest(fixture).expect(403);
+      await expectUnmoved(fixture);
+    });
+
+    it("stage-move rejects an unprivileged tenant role", async () => {
+      const fixture = await seedStageMoveFixture({ tenantRole: "unprivileged" });
+      await stageMoveRequest(fixture).expect(403);
+      await expectUnmoved(fixture);
+    });
+
+    it("stage-move rejects an inactive or absent hop permission", async () => {
+      const inactive = await seedStageMoveFixture({ hopActive: false });
+      await stageMoveRequest(inactive).expect(403);
+      await expectUnmoved(inactive);
+
+      const absent = await seedStageMoveFixture();
+      await db.query(
+        `DELETE FROM route_stage_hop_permissions
+         WHERE tenant_id = $1 AND route_id = $2 AND from_stage_id = $3 AND to_stage_id = $4`,
+        [absent.tenantId, absent.routeId, absent.fromStageId, absent.toStageId],
+      );
+      await stageMoveRequest(absent).expect(403);
+      await expectUnmoved(absent);
+    });
+
+    it("stage-move rejects a cross-route destination even for active staff", async () => {
+      const fixture = await seedStageMoveFixture();
+      const otherRouteId = randomUUID();
+      const otherStageId = randomUUID();
+      await db.query("INSERT INTO routes(id, tenant_id, name) VALUES($1, $2, $3)", [
+        otherRouteId,
+        fixture.tenantId,
+        `Other route ${otherRouteId}`,
+      ]);
+      await db.query(
+        "INSERT INTO stages(id, tenant_id, route_id, name) VALUES($1, $2, $3, 'Elsewhere')",
+        [otherStageId, fixture.tenantId, otherRouteId],
+      );
+      await stageMoveRequest(fixture, {
+        fromStageId: fixture.fromStageId,
+        toStageId: otherStageId,
+      }).expect(403);
+      await expectUnmoved(fixture);
+    });
+
+    it.each([
+      ["route", "UPDATE routes SET active = false WHERE id = $1"],
+      ["from stage", "UPDATE stages SET active = false WHERE id = $1"],
+      ["to stage", "UPDATE stages SET active = false WHERE id = $1"],
+    ])("stage-move rejects an inactive %s", async (kind, statement) => {
+      const fixture = await seedStageMoveFixture();
+      const id =
+        kind === "route"
+          ? fixture.routeId
+          : kind === "from stage"
+            ? fixture.fromStageId
+            : fixture.toStageId;
+      await db.query(statement, [id]);
+      await stageMoveRequest(fixture).expect(403);
+      await expectUnmoved(fixture);
+    });
+
+    it.each(["distributor", "guardian"] as const)(
+      "stage-move rejects a %s-held tag despite a valid staff role and hop",
+      async (holderKind) => {
+        const fixture = await seedStageMoveFixture({ holderKind });
+        await stageMoveRequest(fixture).expect(403);
+        await expectUnmoved(fixture);
+      },
+    );
+
+    it("stage-move rejects a wrong-tenant staff token without changing the target", async () => {
+      const fixture = await seedStageMoveFixture();
+      const otherTenantId = (
+        await db.query<{ id: string }>(
+          "INSERT INTO tenants(name, type) VALUES($1, 'hospital') RETURNING id",
+          [`Stage other tenant ${randomUUID()}`],
+        )
+      ).rows[0]!.id;
+      const outsider = await seedStageMoveFixture({ tenantId: otherTenantId });
+
+      await request(app.getHttpServer())
+        .post(`/v1/app/tags/${fixture.tagCode}/stage-moves`)
+        .set("Authorization", `Bearer ${outsider.token}`)
+        .send({ fromStageId: fixture.fromStageId, toStageId: fixture.toStageId })
+        .expect(404);
+      await expectUnmoved(fixture);
+    });
+
+    it.each(["guardian", "company_admin"] as const)(
+      "stage-move rejects a %s token at the staff HTTP boundary",
+      async (role) => {
+        const fixture = await seedStageMoveFixture();
+        const userId = randomUUID();
+        const password = "non-staff-stage-password";
+        const email = `${userId}@example.test`;
+        await db.query(
+          `INSERT INTO users(id, name, email, password_hash, role, tenant_id)
+           VALUES($1, 'Non staff', $2, $3, $4, $5)`,
+          [userId, email, await bcrypt.hash(password, 4), role, fixture.tenantId],
+        );
+        const token = await tokenForCredentials(email, password);
+        await request(app.getHttpServer())
+          .post(`/v1/app/tags/${fixture.tagCode}/stage-moves`)
+          .set("Authorization", `Bearer ${token}`)
+          .send({ fromStageId: fixture.fromStageId, toStageId: fixture.toStageId })
+          .expect(403);
+        await expectUnmoved(fixture);
+      },
+    );
+
+    it("stage-move rejects an unplaced tag and a stale from-stage without an event", async () => {
+      const unplaced = await seedStageMoveFixture({ currentStageId: null });
+      await stageMoveRequest(unplaced).expect(400);
+      await expect(
+        db.query("SELECT current_stage_id FROM tags WHERE id = $1", [unplaced.tagId]),
+      ).resolves.toMatchObject({ rows: [{ current_stage_id: null }] });
+
+      const stale = await seedStageMoveFixture();
+      await stageMoveRequest(stale, {
+        fromStageId: randomUUID(),
+        toStageId: stale.toStageId,
+      }).expect(409);
+      await expectUnmoved(stale);
+    });
+
+    it("stage-move serializes concurrent requests and emits only one event", async () => {
+      const fixture = await seedStageMoveFixture();
+      const [first, second] = await Promise.all([
+        stageMoveRequest(fixture),
+        stageMoveRequest(fixture),
+      ]);
+      expect([first.status, second.status].sort()).toEqual([201, 409]);
+      await expect(
+        db.query(
+          `SELECT current_stage_id,
+                  (SELECT count(*)::int FROM tag_events WHERE tag_id = $1 AND event_type = 'stage_moved') AS event_count
+           FROM tags WHERE id = $1`,
+          [fixture.tagId],
+        ),
+      ).resolves.toMatchObject({ rows: [{ current_stage_id: fixture.toStageId, event_count: 1 }] });
+    });
+
+    it("stage-move rejects client lifecycle input and Slice 1 rejects malformed stage events", async () => {
+      const fixture = await seedStageMoveFixture();
+      await stageMoveRequest(fixture, {
+        fromStageId: fixture.fromStageId,
+        toStageId: fixture.toStageId,
+        inventoryStatus: "lost",
+      }).expect(400);
+      await expectUnmoved(fixture);
+
+      await expect(
+        db.query(
+          `INSERT INTO tag_events(
+             tag_id, event_type, actor_user_id, from_status, to_status, from_stage_id, to_stage_id
+           ) VALUES($1, 'stage_moved', $2, 'active', 'lost', $3, $4)`,
+          [fixture.tagId, fixture.actorId, fixture.fromStageId, fixture.toStageId],
+        ),
+      ).rejects.toThrow(/must not change inventory lifecycle status/);
+    });
   });
 });
