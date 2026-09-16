@@ -2,6 +2,7 @@ import { Module } from "@nestjs/common";
 import { ConfigModule } from "@nestjs/config";
 import { AccountsModule } from "./accounts/accounts.module";
 import { AdminTagsModule } from "./admin-tags/admin-tags.module";
+import { AssetsModule } from "./assets/assets.module";
 import { ConsentPrivacyModule } from "./consent-privacy/consent-privacy.module";
 import { DatabaseModule } from "./database/database.module";
 import { InventoryModule } from "./inventory/inventory.module";
@@ -33,6 +34,7 @@ import { WardGuardiansModule } from "./ward-guardians/ward-guardians.module";
     DatabaseModule,
     AccountsModule,
     AdminTagsModule,
+    AssetsModule,
     WardGuardiansModule,
     ProfileModule,
     ConsentPrivacyModule,

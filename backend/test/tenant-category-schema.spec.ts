@@ -75,7 +75,7 @@ describe("Step 2 tenant boundary and category-integrity schema", () => {
 
   it("has exactly the two explicit category kinds and normalized category foreign keys", async () => {
     const kinds = await adminPool.query("SELECT DISTINCT kind FROM categories ORDER BY kind");
-    expect(kinds.rows.map((row) => row.kind)).toEqual(["consent_governed_person"]);
+    expect(kinds.rows.map((row) => row.kind)).toEqual(["consent_governed_person", "plain_asset"]);
 
     const constraints = await adminPool.query<{ conname: string }>(
       `SELECT conname FROM pg_constraint

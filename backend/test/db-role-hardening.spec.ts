@@ -8,11 +8,11 @@ describe("Phase 6 Slice 2: Database Role Hardening & Append-Only Privilege Enfor
     process.env.DATABASE_URL ??
     "postgres://postgres:postgres@localhost:5432/safetyspell_integration";
 
-  // Build app role connection string by replacing user and password with safetyspell_app credentials
-  const appDbUrl = adminDbUrl.replace(
-    /postgres:\/\/[^@]+@/,
-    "postgres://safetyspell_app:safetyspell_app_password@",
-  );
+  // Preserve either PostgreSQL URI scheme while replacing only the credentials.
+  const appDbUrlObject = new URL(adminDbUrl);
+  appDbUrlObject.username = "safetyspell_app";
+  appDbUrlObject.password = "safetyspell_app_password";
+  const appDbUrl = appDbUrlObject.toString();
 
   let adminPool: Pool;
   let appPool: Pool;
@@ -22,6 +22,11 @@ describe("Phase 6 Slice 2: Database Role Hardening & Append-Only Privilege Enfor
   beforeAll(async () => {
     adminPool = new Pool({ connectionString: adminDbUrl });
     appPool = new Pool({ connectionString: appDbUrl });
+
+    const appIdentity = await appPool.query<{ current_user: string; rolsuper: boolean }>(
+      "SELECT current_user, rolsuper FROM pg_roles WHERE rolname = current_user",
+    );
+    expect(appIdentity.rows).toEqual([{ current_user: "safetyspell_app", rolsuper: false }]);
 
     // Seed a test tag via admin pool
     testTagCode = createPublicTagCode();

@@ -1,10 +1,13 @@
 export type V1Visibility = "private" | "public";
-export type Provenance = "guardian_reported";
+export type Provenance = "guardian_reported" | "tenant_reported";
 
 export interface ActiveTag {
   id: string;
-  wardId: string;
+  tenantId: string;
   category: string;
+  categoryKind: "consent_governed_person" | "plain_asset";
+  wardId?: string;
+  assetId?: string;
 }
 export interface PublicField {
   key: string;

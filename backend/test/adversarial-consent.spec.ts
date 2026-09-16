@@ -13,6 +13,7 @@ import { WardGuardiansService } from "../src/ward-guardians/ward-guardians.servi
 const baseRepository = (): jest.Mocked<RescueRepository> => ({
   findActiveTag: jest.fn(),
   getFilteredPublicProjection: jest.fn(),
+  getAssetPublicProjection: jest.fn(),
   writeScanLog: jest.fn(),
   listAuthorizedWards: jest.fn(),
   getAuthorizedWard: jest.fn(),
@@ -45,7 +46,13 @@ const roleContext = (
 describe("Rescue ID V1 adversarial consent boundary", () => {
   it("returns only consent-filtered fields and never invokes a raw profile path", async () => {
     const repo = baseRepository();
-    repo.findActiveTag.mockResolvedValue({ id: "tag-1", wardId: "ward-1", category: "medical" });
+    repo.findActiveTag.mockResolvedValue({
+      id: "tag-1",
+      tenantId: "tenant-1",
+      wardId: "ward-1",
+      category: "medical",
+      categoryKind: "consent_governed_person",
+    });
     // The deliberately private address is absent from the projection before ScanResolver sees it.
     repo.getFilteredPublicProjection.mockResolvedValue({
       category: "medical",
@@ -77,6 +84,82 @@ describe("Rescue ID V1 adversarial consent boundary", () => {
     );
   });
 
+  it("branches to the separate asset allowlist only for a tag whose server-owned category is plain_asset", async () => {
+    const repo = baseRepository();
+    repo.findActiveTag.mockResolvedValue({
+      id: "asset-tag-1",
+      tenantId: "tenant-1",
+      assetId: "asset-1",
+      category: "asset",
+      categoryKind: "plain_asset",
+    });
+    repo.getAssetPublicProjection.mockResolvedValue({
+      category: "asset",
+      policyVersion: 1,
+      fields: [
+        {
+          key: "label",
+          label: "Label",
+          value: "Cylinder C-42",
+          provenance: "tenant_reported",
+          catalogVersion: 1,
+        },
+      ],
+    });
+
+    const response = await new ScanResolverService(repo, hashIp()).resolve("asset-opaque-code");
+
+    expect(response).toMatchObject({
+      status: "available",
+      category: "asset",
+      fields: [expect.objectContaining({ key: "label", value: "Cylinder C-42" })],
+    });
+    expect(repo.getAssetPublicProjection).toHaveBeenCalledWith("asset-1", "tenant-1");
+    expect(repo.getFilteredPublicProjection).not.toHaveBeenCalled();
+  });
+
+  it("cannot route a person tag through the asset projection", async () => {
+    const repo = baseRepository();
+    repo.findActiveTag.mockResolvedValue({
+      id: "person-tag-1",
+      tenantId: "tenant-1",
+      wardId: "ward-1",
+      category: "medical",
+      categoryKind: "consent_governed_person",
+    });
+    repo.getFilteredPublicProjection.mockResolvedValue({
+      category: "medical",
+      policyVersion: 1,
+      fields: [],
+    });
+
+    await new ScanResolverService(repo, hashIp()).resolve("person-opaque-code");
+
+    expect(repo.getFilteredPublicProjection).toHaveBeenCalledWith("ward-1");
+    expect(repo.getAssetPublicProjection).not.toHaveBeenCalled();
+  });
+
+  it("keeps an asset tag neutral if its server-side allowlist projection is empty", async () => {
+    const repo = baseRepository();
+    repo.findActiveTag.mockResolvedValue({
+      id: "asset-tag-1",
+      tenantId: "tenant-1",
+      assetId: "asset-1",
+      category: "asset",
+      categoryKind: "plain_asset",
+    });
+    repo.getAssetPublicProjection.mockResolvedValue({
+      category: "asset",
+      policyVersion: 1,
+      fields: [],
+    });
+
+    await expect(
+      new ScanResolverService(repo, hashIp()).resolve("asset-no-fields"),
+    ).resolves.toEqual({ status: "tag_unavailable" });
+    expect(repo.writeScanLog).not.toHaveBeenCalled();
+  });
+
   it("makes a bad short-code checksum indistinguishable in response shape from an unknown tag", async () => {
     const repo = baseRepository();
     repo.findActiveTag.mockResolvedValue(null);
@@ -103,7 +186,13 @@ describe("Rescue ID V1 adversarial consent boundary", () => {
 
   it("returns the neutral response when an available-tag resolution fails internally", async () => {
     const repo = baseRepository();
-    repo.findActiveTag.mockResolvedValue({ id: "tag-1", wardId: "ward-1", category: "medical" });
+    repo.findActiveTag.mockResolvedValue({
+      id: "tag-1",
+      tenantId: "tenant-1",
+      wardId: "ward-1",
+      category: "medical",
+      categoryKind: "consent_governed_person",
+    });
     repo.getFilteredPublicProjection.mockRejectedValue(new Error("permission denied"));
 
     const response = await new ScanResolverService(repo, hashIp()).resolve(
@@ -459,7 +548,13 @@ describe("Rescue ID V1 adversarial consent boundary", () => {
 
   it("returns condition flags only when the filtered projection releases them", async () => {
     const repo = baseRepository();
-    repo.findActiveTag.mockResolvedValue({ id: "tag-1", wardId: "ward-1", category: "medical" });
+    repo.findActiveTag.mockResolvedValue({
+      id: "tag-1",
+      tenantId: "tenant-1",
+      wardId: "ward-1",
+      category: "medical",
+      categoryKind: "consent_governed_person",
+    });
     repo.getFilteredPublicProjection.mockResolvedValueOnce({
       category: "medical",
       policyVersion: 1,

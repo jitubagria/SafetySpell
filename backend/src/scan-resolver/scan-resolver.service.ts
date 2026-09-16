@@ -22,7 +22,18 @@ export class ScanResolverService {
       const tag = await this.repository.findActiveTag(normalizedCode);
       // Identical response for unknown, inactive, lost and revoked codes.
       if (!tag) return { status: "tag_unavailable" };
-      const projection = await this.repository.getFilteredPublicProjection(tag.wardId);
+      const projection =
+        tag.categoryKind === "consent_governed_person" && tag.wardId
+          ? await this.repository.getFilteredPublicProjection(tag.wardId)
+          : tag.categoryKind === "plain_asset" && tag.assetId
+            ? await this.repository.getAssetPublicProjection(tag.assetId, tag.tenantId)
+            : null;
+      if (!projection) return { status: "tag_unavailable" };
+      // An asset is never a live public tag until at least one released
+      // allowlisted field has a value. Person consent behavior remains unchanged.
+      if (tag.categoryKind === "plain_asset" && projection.fields.length === 0) {
+        return { status: "tag_unavailable" };
+      }
       await this.repository.writeScanLog({
         tagId: tag.id,
         policyVersion: projection.policyVersion,

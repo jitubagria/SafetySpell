@@ -37,6 +37,7 @@ const testTables = [
   "scan_log",
   "tag_events",
   "tags",
+  "assets",
   "tag_batches",
   "distributor_allowed_categories",
   "distributors",
@@ -204,6 +205,7 @@ beforeAll(async () => {
     "020_scan_log_append_only.sql",
     "021_tenant_boundary_and_category_integrity.sql",
     "022_canonical_tag_lifecycle.sql",
+    "023_asset_subject_and_public_projection.sql",
   ]);
   const conditionFields = await db.query(
     "SELECT field_key, validation_policy FROM field_catalog WHERE category = 'medical' AND field_key IN ('condition_flags', 'condition_notes') ORDER BY field_key",
@@ -224,6 +226,7 @@ beforeAll(async () => {
   expect(tables.rows.map((row) => row.tablename)).toEqual(
     expect.arrayContaining([
       "consent_audit",
+      "assets",
       "categories",
       "distributors",
       "orders",
@@ -2309,4 +2312,224 @@ describe("Rescue ID live PostgreSQL integration boundary", () => {
       { holder_kind: "distributor", holder_distributor_id: distributorId, tenant_id: tenantA },
     ]);
   }, 30_000);
+
+  it("activates a plain asset without writing person or consent tables and exposes only released allowlisted fields", async () => {
+    const assetScanIp = "198.51.100.240";
+    const tenantId = (
+      await db.query<{ id: string }>(
+        "INSERT INTO tenants(name, type) VALUES($1, 'business') RETURNING id",
+        [`Asset tenant ${randomUUID()}`],
+      )
+    ).rows[0]!.id;
+    const adminId = randomUUID();
+    const password = "asset-admin-password";
+    await db.query(
+      `INSERT INTO users(id, name, email, password_hash, role, tenant_id)
+       VALUES($1, 'Asset admin', $2, $3, 'company_admin', $4)`,
+      [adminId, `${adminId}@example.test`, await bcrypt.hash(password, 4), tenantId],
+    );
+    const assetCode = createPublicTagCode();
+    await db.query(
+      `INSERT INTO tags(code, category, category_id, form, inventory_status, holder_kind, tenant_id)
+       VALUES($1, 'asset', (SELECT id FROM categories WHERE key = 'asset'), 'plate', 'blank', 'company', $2)`,
+      [assetCode, tenantId],
+    );
+    const token = await tokenForCredentials(`${adminId}@example.test`, password);
+    const before = await db.query(
+      `SELECT (SELECT count(*) FROM wards) AS wards,
+              (SELECT count(*) FROM ward_guardians) AS ward_guardians,
+              (SELECT count(*) FROM ward_field_values) AS ward_field_values,
+              (SELECT count(*) FROM ward_field_visibility) AS ward_field_visibility,
+              (SELECT count(*) FROM consent_audit) AS consent_audit`,
+    );
+
+    const activated = await request(app.getHttpServer())
+      .post("/v1/app/assets/activate")
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        tagCode: assetCode,
+        categoryKey: "asset",
+        label: "Oxygen cylinder C-42",
+        assetType: "Medical gas cylinder",
+        returnReference: "RET-441",
+        internalNote: "Owner contact: private@example.test; 12 Private Road",
+        publicFields: ["label", "asset_type"],
+      })
+      .expect(201);
+    expect(activated.body).toMatchObject({ success: true, code: assetCode, status: "active" });
+
+    const after = await db.query(
+      `SELECT (SELECT count(*) FROM wards) AS wards,
+              (SELECT count(*) FROM ward_guardians) AS ward_guardians,
+              (SELECT count(*) FROM ward_field_values) AS ward_field_values,
+              (SELECT count(*) FROM ward_field_visibility) AS ward_field_visibility,
+              (SELECT count(*) FROM consent_audit) AS consent_audit`,
+    );
+    expect(after.rows).toEqual(before.rows);
+    await expect(
+      db.query(
+        "SELECT inventory_status, asset_id, ward_id, activation_pin_hash FROM tags WHERE code = $1",
+        [assetCode],
+      ),
+    ).resolves.toMatchObject({
+      rows: [
+        expect.objectContaining({
+          inventory_status: "active",
+          ward_id: null,
+          activation_pin_hash: null,
+        }),
+      ],
+    });
+
+    const scan = await request(app.getHttpServer())
+      .get(`/v1/public/scan/${assetCode}`)
+      .set("X-Forwarded-For", assetScanIp)
+      .expect(200);
+    expect(scan.body).toEqual({
+      status: "available",
+      category: "asset",
+      fields: [
+        expect.objectContaining({
+          key: "label",
+          value: "Oxygen cylinder C-42",
+          provenance: "tenant_reported",
+        }),
+        expect.objectContaining({
+          key: "asset_type",
+          value: "Medical gas cylinder",
+          provenance: "tenant_reported",
+        }),
+      ],
+      disclaimer: "Information is family-provided. This is not medical advice.",
+    });
+    const serialized = JSON.stringify(scan.body);
+    expect(serialized).not.toContain("RET-441");
+    expect(serialized).not.toContain("private@example.test");
+    expect(serialized).not.toContain("Private Road");
+
+    const person = await seed({ visibility: "public" });
+    const personScan = await request(app.getHttpServer())
+      .get(`/v1/public/scan/${person.tagCode}`)
+      .set("X-Forwarded-For", assetScanIp)
+      .expect(200);
+    expect(Object.keys(scan.body).sort()).toEqual(Object.keys(personScan.body).sort());
+    expect(personScan.body.fields).toEqual([
+      expect.objectContaining({ key: "blood_group", value: "O+", provenance: "guardian_reported" }),
+    ]);
+  });
+
+  it("keeps asset activation and reads tenant scoped, rejects person tags, and keeps asset unavailability neutral", async () => {
+    const assetScanIp = "198.51.100.241";
+    const tenantA = (
+      await db.query<{ id: string }>(
+        "INSERT INTO tenants(name, type) VALUES($1, 'business') RETURNING id",
+        [`Asset A ${randomUUID()}`],
+      )
+    ).rows[0]!.id;
+    const tenantB = (
+      await db.query<{ id: string }>(
+        "INSERT INTO tenants(name, type) VALUES($1, 'business') RETURNING id",
+        [`Asset B ${randomUUID()}`],
+      )
+    ).rows[0]!.id;
+    const password = "asset-isolation-password";
+    const adminA = randomUUID();
+    const adminB = randomUUID();
+    await db.query(
+      `INSERT INTO users(id, name, email, password_hash, role, tenant_id)
+       VALUES ($1, 'Asset A admin', $2, $3, 'company_admin', $4),
+              ($5, 'Asset B admin', $6, $3, 'company_admin', $7)`,
+      [
+        adminA,
+        `${adminA}@example.test`,
+        await bcrypt.hash(password, 4),
+        tenantA,
+        adminB,
+        `${adminB}@example.test`,
+        tenantB,
+      ],
+    );
+    const assetCode = createPublicTagCode();
+    const blankAssetCode = createPublicTagCode();
+    const personCode = createPublicTagCode();
+    await db.query(
+      `INSERT INTO tags(code, category, category_id, form, inventory_status, holder_kind, tenant_id)
+       VALUES ($1, 'asset', (SELECT id FROM categories WHERE key = 'asset'), 'plate', 'blank', 'company', $4),
+              ($2, 'asset', (SELECT id FROM categories WHERE key = 'asset'), 'plate', 'blank', 'company', $4),
+              ($3, 'medical', (SELECT id FROM categories WHERE key = 'medical'), 'band', 'blank', 'company', $4)`,
+      [assetCode, blankAssetCode, personCode, tenantA],
+    );
+    const tokenA = await tokenForCredentials(`${adminA}@example.test`, password);
+    const tokenB = await tokenForCredentials(`${adminB}@example.test`, password);
+    const activated = await request(app.getHttpServer())
+      .post("/v1/app/assets/activate")
+      .set("Authorization", `Bearer ${tokenA}`)
+      .send({
+        tagCode: assetCode,
+        categoryKey: "asset",
+        label: "Tenant A pump",
+        internalNote: "never public",
+        publicFields: ["label"],
+      })
+      .expect(201);
+
+    await request(app.getHttpServer())
+      .post("/v1/app/assets/activate")
+      .set("Authorization", `Bearer ${tokenA}`)
+      .send({
+        tagCode: personCode,
+        categoryKey: "asset",
+        label: "Attempted bypass",
+        publicFields: ["label"],
+      })
+      .expect(400);
+    await expect(
+      db.query("SELECT asset_id, inventory_status FROM tags WHERE code = $1", [personCode]),
+    ).resolves.toMatchObject({ rows: [{ asset_id: null, inventory_status: "blank" }] });
+
+    await request(app.getHttpServer())
+      .get("/v1/app/assets")
+      .set("Authorization", `Bearer ${tokenB}`)
+      .expect(200)
+      .expect([]);
+    await request(app.getHttpServer())
+      .get(`/v1/app/assets/${activated.body.assetId}`)
+      .set("Authorization", `Bearer ${tokenB}`)
+      .expect(404);
+    await request(app.getHttpServer())
+      .post("/v1/app/assets/activate")
+      .set("Authorization", `Bearer ${tokenB}`)
+      .send({
+        tagCode: blankAssetCode,
+        categoryKey: "asset",
+        label: "Cross tenant",
+        publicFields: ["label"],
+      })
+      .expect(404);
+
+    const unknown = await request(app.getHttpServer())
+      .get(`/v1/public/scan/${createPublicTagCode()}`)
+      .set("X-Forwarded-For", assetScanIp)
+      .expect(200);
+    const blank = await request(app.getHttpServer())
+      .get(`/v1/public/scan/${blankAssetCode}`)
+      .set("X-Forwarded-For", assetScanIp)
+      .expect(200);
+    await db.query("UPDATE tags SET inventory_status = 'lost' WHERE code = $1", [assetCode]);
+    const lost = await request(app.getHttpServer())
+      .get(`/v1/public/scan/${assetCode}`)
+      .set("X-Forwarded-For", assetScanIp)
+      .expect(200);
+    await db.query("UPDATE tags SET inventory_status = 'revoked' WHERE code = $1", [assetCode]);
+    const revoked = await request(app.getHttpServer())
+      .get(`/v1/public/scan/${assetCode}`)
+      .set("X-Forwarded-For", assetScanIp)
+      .expect(200);
+    expect([blank.body, lost.body, revoked.body]).toEqual([
+      unknown.body,
+      unknown.body,
+      unknown.body,
+    ]);
+    expect(unknown.body).toEqual({ status: "tag_unavailable" });
+  });
 });

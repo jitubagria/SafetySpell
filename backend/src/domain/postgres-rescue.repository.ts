@@ -2,6 +2,7 @@ import { ForbiddenException, Injectable, NotFoundException } from "@nestjs/commo
 import { PoolClient } from "pg";
 import { DatabaseService } from "../database/database.service";
 import { CONDITION_FLAG_KEYS } from "../category-catalog/catalog-value-validation";
+import { ASSET_PUBLIC_FIELD_DEFINITIONS } from "../assets/asset-policy";
 import { ActiveTag, PublicProjection, Provenance, V1Visibility } from "./types";
 import {
   CatalogField,
@@ -29,17 +30,25 @@ export class PostgresRescueRepository implements RescueRepository {
 
   async findActiveTag(code: string): Promise<ActiveTag | null> {
     const result = await this.db.query<Row>(
-      `SELECT t.id, t.ward_id, t.category FROM tags t
-       JOIN wards w ON w.id = t.ward_id AND w.status = 'active'
-       WHERE upper(t.code) = upper($1) AND t.inventory_status = 'active' AND t.ward_id IS NOT NULL`,
+      `SELECT t.id, t.tenant_id, t.ward_id, t.asset_id, t.category, c.kind AS category_kind
+       FROM tags t
+       JOIN categories c ON c.id = t.category_id
+       LEFT JOIN wards w ON w.id = t.ward_id AND w.status = 'active'
+       LEFT JOIN assets a ON a.id = t.asset_id AND a.tenant_id = t.tenant_id
+       WHERE upper(t.code) = upper($1) AND t.inventory_status = 'active'
+         AND ((c.kind = 'consent_governed_person' AND w.id IS NOT NULL AND t.asset_id IS NULL)
+           OR (c.kind = 'plain_asset' AND a.id IS NOT NULL AND t.ward_id IS NULL))`,
       [code],
     );
     const row = result.rows[0];
     return row
       ? {
           id: asString(row, "id"),
-          wardId: asString(row, "ward_id"),
+          tenantId: asString(row, "tenant_id"),
           category: asString(row, "category"),
+          categoryKind: asString(row, "category_kind") as ActiveTag["categoryKind"],
+          wardId: row.ward_id ? asString(row, "ward_id") : undefined,
+          assetId: row.asset_id ? asString(row, "asset_id") : undefined,
         }
       : null;
   }
@@ -80,6 +89,39 @@ export class PostgresRescueRepository implements RescueRepository {
       category: first ? asString(first, "category") : asString(categoryRow, "category"),
       fields,
       policyVersion: Math.max(1, ...fields.map((field) => field.catalogVersion)),
+    };
+  }
+
+  async getAssetPublicProjection(assetId: string, tenantId: string): Promise<PublicProjection> {
+    // Never select a full asset record here. Start with no fields and add only
+    // explicitly allowlisted, explicitly released, non-empty values.
+    const result = await this.db.query<Row>(
+      `SELECT c.key AS category, a.label, a.asset_type, a.return_reference,
+              a.public_field_keys, a.public_policy_version
+       FROM assets a JOIN categories c ON c.id = a.category_id
+       WHERE a.id = $1 AND a.tenant_id = $2 AND c.kind = 'plain_asset'`,
+      [assetId, tenantId],
+    );
+    const row = result.rows[0];
+    if (!row) throw new NotFoundException("Asset unavailable");
+    const released = new Set(Array.isArray(row.public_field_keys) ? row.public_field_keys : []);
+    const fields: PublicProjection["fields"] = [];
+    for (const definition of ASSET_PUBLIC_FIELD_DEFINITIONS) {
+      const value = row[definition.column];
+      if (released.has(definition.key) && typeof value === "string" && value.trim()) {
+        fields.push({
+          key: definition.key,
+          label: definition.label,
+          value,
+          provenance: "tenant_reported",
+          catalogVersion: Number(row.public_policy_version),
+        });
+      }
+    }
+    return {
+      category: asString(row, "category"),
+      fields,
+      policyVersion: Number(row.public_policy_version),
     };
   }
 

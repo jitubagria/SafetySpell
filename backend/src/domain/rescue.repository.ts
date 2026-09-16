@@ -38,6 +38,8 @@ export interface RescueRepository {
   findActiveTag(code: string): Promise<ActiveTag | null>;
   /** The only public-profile read: query includes every consent gate. */
   getFilteredPublicProjection(wardId: string): Promise<PublicProjection>;
+  /** Plain assets have a separate, explicit server-side public allowlist. */
+  getAssetPublicProjection(assetId: string, tenantId: string): Promise<PublicProjection>;
   writeScanLog(input: {
     tagId: string;
     policyVersion: number;
