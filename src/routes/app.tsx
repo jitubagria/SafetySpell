@@ -3,14 +3,17 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Bell,
   CircleUserRound,
+  History,
   Home,
   LoaderCircle,
   LogOut,
   QrCode,
+  ShieldAlert,
   ShieldCheck,
   UsersRound,
 } from "lucide-react";
 import { FormEvent, useEffect, useState } from "react";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { DemoGate } from "@/components/demo-gate";
@@ -18,15 +21,20 @@ import { WardTagQr } from "@/components/ward-tag-qr";
 import { conditionFlagDefinitions, knownConditionFlagKeys } from "@/lib/condition-flags";
 import { isProduction } from "@/lib/env";
 import {
+  type ApiConsentAuditEntry,
   type ApiGuardianField,
   type ApiWardTag,
+  activateTag,
+  claimTag,
   coreApiUrl,
   CoreApiError,
+  getConsentAudit,
   listFields,
   listTags,
   listWards,
   login,
   setVisibility,
+  withdrawPublicRelease,
   writeField,
 } from "@/lib/core-api";
 
@@ -100,6 +108,12 @@ function GuardianApp() {
     enabled: Boolean(token && selectedWard),
     retry: false,
   });
+  const consentAudit = useQuery({
+    queryKey: ["guardian-consent-audit", selectedWard?.id],
+    queryFn: () => getConsentAudit(token ?? "", selectedWard?.id ?? ""),
+    enabled: Boolean(token && selectedWard),
+    retry: false,
+  });
 
   useEffect(() => {
     if (!selectedWardId && wards.data?.[0]) setSelectedWardId(wards.data[0].id);
@@ -149,11 +163,41 @@ function GuardianApp() {
       await queryClient.invalidateQueries({
         queryKey: ["guardian-fields", token, selectedWard.id],
       });
+      await queryClient.invalidateQueries({
+        queryKey: ["guardian-consent-audit", selectedWard.id],
+      });
     } catch (error) {
       setUpdateError(message(error));
     } finally {
       setPendingFieldId(null);
     }
+  }
+
+  async function withdrawAllConsent() {
+    if (!token || !selectedWard)
+      throw new Error("Select a ward before withdrawing public release.");
+    const result = await withdrawPublicRelease(token, selectedWard.id);
+    await queryClient.invalidateQueries({
+      queryKey: ["guardian-fields", token, selectedWard.id],
+    });
+    await queryClient.invalidateQueries({
+      queryKey: ["guardian-consent-audit", selectedWard.id],
+    });
+    return result;
+  }
+
+  async function claimWardTag(tagCode: string, pin: string) {
+    if (!token || !selectedWard) throw new Error("Select a ward before claiming a tag.");
+    const result = await claimTag(token, selectedWard.id, tagCode, pin);
+    await queryClient.invalidateQueries({ queryKey: ["guardian-tags", token, selectedWard.id] });
+    return result;
+  }
+
+  async function activateWardTag(tagCode: string) {
+    if (!token || !selectedWard) throw new Error("Select a ward before activating a tag.");
+    const result = await activateTag(token, selectedWard.id, tagCode);
+    await queryClient.invalidateQueries({ queryKey: ["guardian-tags", token, selectedWard.id] });
+    return result;
   }
 
   if (!coreApiUrl) return <UnconfiguredApp />;
@@ -204,6 +248,12 @@ function GuardianApp() {
             updateError={updateError}
             onUpdateField={updateField}
             onUpdateVisibility={updateVisibility}
+            onClaimTag={claimWardTag}
+            onActivateTag={activateWardTag}
+            auditEntries={consentAudit.data ?? []}
+            auditPending={consentAudit.isPending}
+            auditError={consentAudit.error}
+            onWithdrawAllConsent={withdrawAllConsent}
             onSignOut={() => {
               setToken(null);
               setSelectedWardId(null);
@@ -294,6 +344,12 @@ function GuardianWorkspace({
   updateError,
   onUpdateField,
   onUpdateVisibility,
+  onClaimTag,
+  onActivateTag,
+  auditEntries,
+  auditPending,
+  auditError,
+  onWithdrawAllConsent,
   onSignOut,
 }: {
   wards: Array<{ id: string; name: string; category: string }>;
@@ -310,8 +366,16 @@ function GuardianWorkspace({
   updateError: string | null;
   onUpdateField: (field: ApiGuardianField, value: unknown) => Promise<void>;
   onUpdateVisibility: (field: ApiGuardianField) => Promise<void>;
+  onClaimTag: (tagCode: string, pin: string) => Promise<{ code: string }>;
+  onActivateTag: (tagCode: string) => Promise<{ code: string; status: "active" }>;
+  auditEntries: ApiConsentAuditEntry[];
+  auditPending: boolean;
+  auditError: Error | null;
+  onWithdrawAllConsent: () => Promise<unknown>;
   onSignOut: () => void;
 }) {
+  const activeTags = tags.filter((tag) => tag.status === "active");
+  const publicFieldCount = fields.filter((field) => field.visibility === "public").length;
   return (
     <>
       <section className="mt-7" aria-labelledby="wards-title">
@@ -382,6 +446,17 @@ function GuardianWorkspace({
           </div>
         </CardContent>
       </Card>
+      <ConsentWithdrawalPanel
+        disabled={!selectedWardId}
+        publicFieldCount={publicFieldCount}
+        onWithdraw={onWithdrawAllConsent}
+      />
+      <TagLifecyclePanel
+        assignedTags={tags.filter((tag) => tag.status === "assigned")}
+        disabled={!selectedWardId}
+        onClaimTag={onClaimTag}
+        onActivateTag={onActivateTag}
+      />
       <Card className="mt-7 border-category/30">
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
@@ -396,13 +471,342 @@ function GuardianWorkspace({
         <CardContent>
           <WardTagQr
             wardLabel={selectedWardLabel}
-            tags={tags}
+            tags={activeTags}
             pending={tagsPending}
             error={tagsError}
           />
         </CardContent>
       </Card>
+      <ConsentAuditTimeline auditEntries={auditEntries} pending={auditPending} error={auditError} />
     </>
+  );
+}
+
+export function TagLifecyclePanel({
+  assignedTags,
+  disabled,
+  onClaimTag,
+  onActivateTag,
+}: {
+  assignedTags: ApiWardTag[];
+  disabled: boolean;
+  onClaimTag: (tagCode: string, pin: string) => Promise<{ code: string }>;
+  onActivateTag: (tagCode: string) => Promise<{ code: string; status: "active" }>;
+}) {
+  const [tagCode, setTagCode] = useState("");
+  const [pin, setPin] = useState("");
+  const [pendingCode, setPendingCode] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  async function claim(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setPendingCode("claim");
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await onClaimTag(tagCode, pin);
+      setTagCode("");
+      setPin("");
+      setNotice(
+        `${result.code} is claimed. Complete activation only after a real public field is released.`,
+      );
+    } catch (failure) {
+      setError(message(failure));
+    } finally {
+      setPendingCode(null);
+    }
+  }
+
+  async function activate(code: string) {
+    setPendingCode(code);
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await onActivateTag(code);
+      setNotice(
+        `${result.code} is active. Its released profile fields are now available on the public scan.`,
+      );
+    } catch (failure) {
+      setError(message(failure));
+    } finally {
+      setPendingCode(null);
+    }
+  }
+
+  return (
+    <Card className="mt-7 border-category/30">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <QrCode className="text-category" /> Claim and activate a tag
+        </CardTitle>
+        <CardDescription>
+          Claim needs the printed tag code and one-time activation PIN. Activation is
+          server-checked: at least one real profile field must already be publicly released.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="grid gap-5">
+        <form className="grid gap-3" onSubmit={claim}>
+          <label className="grid gap-1 text-sm font-semibold">
+            Tag code
+            <input
+              className="h-11 rounded-md border border-input bg-background px-3 font-mono uppercase"
+              value={tagCode}
+              onChange={(event) => setTagCode(event.target.value.toUpperCase())}
+              placeholder="SS-XXXX-XXXX"
+              autoCapitalize="characters"
+              required
+              disabled={disabled || pendingCode !== null}
+            />
+          </label>
+          <label className="grid gap-1 text-sm font-semibold">
+            One-time activation PIN
+            <input
+              className="h-11 rounded-md border border-input bg-background px-3 font-mono uppercase"
+              value={pin}
+              onChange={(event) => setPin(event.target.value.toUpperCase())}
+              autoCapitalize="characters"
+              required
+              disabled={disabled || pendingCode !== null}
+            />
+          </label>
+          <Button type="submit" size="touch" disabled={disabled || pendingCode !== null}>
+            {pendingCode === "claim" ? <LoaderCircle className="animate-spin" /> : <QrCode />}
+            {pendingCode === "claim" ? "Claiming tag" : "CLAIM TAG"}
+          </Button>
+        </form>
+        {error ? <p className="text-sm font-semibold text-destructive">{error}</p> : null}
+        {notice ? <p className="text-sm font-semibold text-category">{notice}</p> : null}
+        {assignedTags.length ? (
+          <section aria-labelledby="pending-activation-title">
+            <h3 id="pending-activation-title" className="font-semibold">
+              Ready to activate
+            </h3>
+            <p className="mt-1 text-sm text-muted-foreground">
+              These tags are assigned but not public. Activate only after the profile has a released
+              field.
+            </p>
+            <div className="mt-3 grid gap-3">
+              {assignedTags.map((tag) => (
+                <div
+                  key={tag.code}
+                  className="flex flex-wrap items-center justify-between gap-3 rounded-lg border p-3"
+                >
+                  <span className="font-mono text-sm">{tag.code}</span>
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={pendingCode !== null}
+                    onClick={() => void activate(tag.code)}
+                  >
+                    {pendingCode === tag.code ? (
+                      <LoaderCircle className="animate-spin" />
+                    ) : (
+                      <ShieldCheck />
+                    )}
+                    {pendingCode === tag.code ? "Activating" : "ACTIVATE"}
+                  </Button>
+                </div>
+              ))}
+            </div>
+          </section>
+        ) : null}
+      </CardContent>
+    </Card>
+  );
+}
+
+export const readableFieldLabels: Record<string, string> = {
+  age_band: "Age band",
+  primary_language: "Primary language",
+  blood_group: "Blood group",
+  allergy: "Allergies",
+  condition_flags: "Condition flags",
+  condition_notes: "Condition notes",
+};
+
+export function formatFieldKey(key?: string): string {
+  if (!key) return "All public fields";
+  return (
+    readableFieldLabels[key] ??
+    key.replace(/_/g, " ").replace(/\b\w/g, (character) => character.toUpperCase())
+  );
+}
+
+export function ConsentWithdrawalPanel({
+  disabled,
+  publicFieldCount,
+  onWithdraw,
+}: {
+  disabled: boolean;
+  publicFieldCount: number;
+  onWithdraw: () => Promise<unknown>;
+}) {
+  const [confirmed, setConfirmed] = useState(false);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  async function handleWithdraw() {
+    if (!confirmed) return;
+    setPending(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await onWithdraw();
+      setConfirmed(false);
+      setNotice(
+        "All public disclosures have been withdrawn. Emergency scan pages now show the neutral unavailable response.",
+      );
+    } catch (failure) {
+      setError(message(failure));
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <Card
+      className="mt-7 border-destructive/40 bg-destructive/5"
+      data-testid="consent-withdrawal-panel"
+    >
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-destructive">
+          <ShieldAlert className="size-5" />
+          Withdraw all public releases
+        </CardTitle>
+        <CardDescription>
+          Instantly and atomically revoke every publicly released field for this ward. Once
+          withdrawn, public scan pages display only the neutral unavailable response until you
+          explicitly re-release fields.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="grid gap-4">
+        {publicFieldCount === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            No fields are currently released publicly for this ward. Emergency scans already show
+            the neutral unavailable response.
+          </p>
+        ) : (
+          <p className="text-sm font-medium text-destructive">
+            Currently {publicFieldCount} {publicFieldCount === 1 ? "field is" : "fields are"}{" "}
+            publicly visible on rescue ID scans.
+          </p>
+        )}
+
+        <label className="flex items-start gap-2 text-sm">
+          <input
+            id="withdraw-confirm-checkbox"
+            type="checkbox"
+            className="mt-0.5 rounded border-input"
+            checked={confirmed}
+            onChange={(event) => setConfirmed(event.target.checked)}
+            disabled={disabled || pending}
+          />
+          <span>
+            I understand that withdrawing public release removes all emergency information from
+            public view immediately.
+          </span>
+        </label>
+
+        <div>
+          <Button
+            type="button"
+            variant="destructive"
+            disabled={disabled || pending || !confirmed}
+            onClick={handleWithdraw}
+          >
+            {pending ? <LoaderCircle className="animate-spin" /> : <ShieldAlert />}
+            {pending ? "Withdrawing public access…" : "WITHDRAW ALL PUBLIC RELEASES"}
+          </Button>
+        </div>
+
+        {error ? <p className="text-sm font-semibold text-destructive">{error}</p> : null}
+        {notice ? (
+          <p className="text-sm font-semibold text-emerald-700 dark:text-emerald-400">{notice}</p>
+        ) : null}
+      </CardContent>
+    </Card>
+  );
+}
+
+export function ConsentAuditTimeline({
+  auditEntries,
+  pending,
+  error,
+}: {
+  auditEntries: ApiConsentAuditEntry[];
+  pending: boolean;
+  error: Error | null;
+}) {
+  return (
+    <Card className="mt-7 border-category/30" data-testid="consent-audit-timeline">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <History className="size-5 text-category" />
+          Consent & disclosure history
+        </CardTitle>
+        <CardDescription>
+          Immutable append-only record of all visibility and withdrawal actions for this ward.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {pending ? (
+          <p className="flex items-center gap-2 text-sm text-muted-foreground">
+            <LoaderCircle className="size-4 animate-spin" /> Loading consent history…
+          </p>
+        ) : null}
+        {error ? <p className="text-sm font-semibold text-destructive">{message(error)}</p> : null}
+        {!pending && !error && auditEntries.length === 0 ? (
+          <p className="text-sm text-muted-foreground" data-testid="audit-empty-state">
+            No consent modifications recorded for this ward yet.
+          </p>
+        ) : null}
+        {auditEntries.length > 0 ? (
+          <div className="grid gap-3">
+            {auditEntries.map((entry, index) => {
+              const isWithdrawal = entry.eventType === "public_release_withdrawn";
+              const isPublic = entry.newVisibility === "public";
+              return (
+                <div
+                  key={`${entry.createdAt}-${index}`}
+                  className="flex flex-wrap items-center justify-between gap-3 rounded-lg border p-3.5 text-sm"
+                >
+                  <div className="grid gap-1">
+                    <div className="flex items-center gap-2">
+                      <span className="font-semibold text-foreground">
+                        {formatFieldKey(entry.fieldKey)}
+                      </span>
+                      {isWithdrawal ? (
+                        <Badge variant="destructive">All public releases withdrawn</Badge>
+                      ) : isPublic ? (
+                        <Badge className="bg-category text-category-foreground hover:bg-category/90">
+                          Released publicly
+                        </Badge>
+                      ) : (
+                        <Badge variant="outline">Set to private</Badge>
+                      )}
+                    </div>
+                    {entry.oldVisibility && entry.newVisibility ? (
+                      <p className="text-xs text-muted-foreground">
+                        Changed from <span className="font-medium">{entry.oldVisibility}</span> to{" "}
+                        <span className="font-medium">{entry.newVisibility}</span>
+                      </p>
+                    ) : null}
+                  </div>
+                  <time
+                    className="font-mono text-xs text-muted-foreground"
+                    dateTime={entry.createdAt}
+                  >
+                    {new Date(entry.createdAt).toLocaleString()}
+                  </time>
+                </div>
+              );
+            })}
+          </div>
+        ) : null}
+      </CardContent>
+    </Card>
   );
 }
 

@@ -6,8 +6,8 @@ import { WardTagQr } from "./ward-tag-qr";
 describe("WardTagQr", () => {
   const defaultWardLabel = "Aarav Sharma";
   const sampleTags = [
-    { code: "SS-DEMO-0001", form: "silicone_band" },
-    { code: "SS-DEMO-0002", form: "card" },
+    { code: "SS-DEMO-0001", form: "silicone_band", status: "active" },
+    { code: "SS-DEMO-0002", form: "card", status: "active" },
   ];
 
   it("renders loading state when pending is true", () => {

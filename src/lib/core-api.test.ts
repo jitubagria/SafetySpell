@@ -7,6 +7,8 @@ import {
   setVisibility,
   claimTag,
   activateTag,
+  withdrawPublicRelease,
+  getConsentAudit,
   revokeAdminTag,
   login,
 } from "./core-api";
@@ -204,6 +206,53 @@ describe("core-api", () => {
         expect.stringContaining("/v1/app/wards/ward-123/tags/SS-DEMO-0001/activate"),
         expect.objectContaining({
           method: "POST",
+        }),
+      );
+    });
+
+    it("withdrawPublicRelease sends POST to withdraw all public fields atomically", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ status: "withdrawn", visibility: "private" }),
+      });
+
+      const res = await withdrawPublicRelease("fake-token", "ward-123");
+      expect(res).toEqual({ status: "withdrawn", visibility: "private" });
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining("/v1/app/wards/ward-123/public-release/withdraw"),
+        expect.objectContaining({
+          method: "POST",
+          headers: expect.objectContaining({ Authorization: "Bearer fake-token" }),
+        }),
+      );
+    });
+
+    it("getConsentAudit sends GET to retrieve chronological audit records", async () => {
+      const mockAudit = [
+        {
+          eventType: "public_release_withdrawn",
+          createdAt: "2026-09-20T12:00:00Z",
+        },
+        {
+          eventType: "visibility_changed",
+          fieldKey: "blood_group",
+          oldVisibility: "private",
+          newVisibility: "public",
+          createdAt: "2026-09-20T11:00:00Z",
+        },
+      ];
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => mockAudit,
+      });
+
+      const res = await getConsentAudit("fake-token", "ward-123");
+      expect(res).toEqual(mockAudit);
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining("/v1/app/wards/ward-123/consent-audit"),
+        expect.objectContaining({
+          method: "GET",
+          headers: expect.objectContaining({ Authorization: "Bearer fake-token" }),
         }),
       );
     });

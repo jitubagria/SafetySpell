@@ -587,14 +587,14 @@ describe("Rescue ID live PostgreSQL integration boundary", () => {
       .expect(403);
   });
 
-  it("returns a ward's active tag codes to its guardian and hides them from outsiders", async () => {
+  it("returns a ward's active tag codes and statuses to its guardian and hides them from outsiders", async () => {
     const data = await seed();
     const token = await tokenFor(data);
     const authorized = await request(app.getHttpServer())
       .get(`/v1/app/wards/${data.wardId}/tags`)
       .set("Authorization", `Bearer ${token}`)
       .expect(200);
-    expect(authorized.body).toEqual([{ code: data.tagCode, form: "band" }]);
+    expect(authorized.body).toEqual([{ code: data.tagCode, form: "band", status: "active" }]);
 
     const outsiderId = randomUUID();
     await db.query(
@@ -2065,6 +2065,7 @@ describe("Rescue ID live PostgreSQL integration boundary", () => {
       {
         code: tagItem.code,
         form: "card",
+        status: "active",
       },
     ]);
   });

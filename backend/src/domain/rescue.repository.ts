@@ -29,9 +29,10 @@ export interface CatalogField {
   validationPolicy: unknown;
 }
 export interface WardTag {
-  /** The existing opaque, high-entropy scan code. Not personal data. */
+  /** An opaque code and lifecycle state for a tag held by this authorised guardian. */
   code: string;
   form: string;
+  status: "assigned" | "active";
 }
 
 export interface RescueRepository {
@@ -52,7 +53,7 @@ export interface RescueRepository {
     tenantId: string | undefined,
     wardId: string,
   ): Promise<GuardianWard | null>;
-  /** Active scan tags for a ward the guardian is authorised for. Codes only, no ward data. */
+  /** Assigned/active tags for a ward the guardian is authorised for. No ward data. */
   listAuthorizedWardTags(
     userId: string,
     tenantId: string | undefined,

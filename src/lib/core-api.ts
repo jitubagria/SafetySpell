@@ -28,6 +28,7 @@ export interface ApiGuardianField {
 export interface ApiWardTag {
   code: string;
   form: string;
+  status: "assigned" | "active";
 }
 
 export interface ApiScanResponse {
@@ -165,6 +166,33 @@ export function activateTag(
   return call(
     `/v1/app/wards/${wardId}/tags/${encodeURIComponent(tagCode)}/activate`,
     { method: "POST" },
+    token,
+  );
+}
+
+export interface ApiConsentAuditEntry {
+  eventType: string;
+  fieldKey?: string;
+  oldVisibility?: ApiVisibility;
+  newVisibility?: ApiVisibility;
+  createdAt: string;
+}
+
+export function withdrawPublicRelease(
+  token: string,
+  wardId: string,
+): Promise<{ status: "withdrawn"; visibility: "private"; note?: string }> {
+  return call(
+    `/v1/app/wards/${encodeURIComponent(wardId)}/public-release/withdraw`,
+    { method: "POST" },
+    token,
+  );
+}
+
+export function getConsentAudit(token: string, wardId: string): Promise<ApiConsentAuditEntry[]> {
+  return call(
+    `/v1/app/wards/${encodeURIComponent(wardId)}/consent-audit`,
+    { method: "GET" },
     token,
   );
 }

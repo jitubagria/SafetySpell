@@ -1,8 +1,15 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { FieldEditor, PreviewNav } from "./app";
-import type { ApiGuardianField } from "@/lib/core-api";
+import {
+  ConsentAuditTimeline,
+  ConsentWithdrawalPanel,
+  FieldEditor,
+  formatFieldKey,
+  PreviewNav,
+  TagLifecyclePanel,
+} from "./app";
+import type { ApiConsentAuditEntry, ApiGuardianField } from "@/lib/core-api";
 
 describe("FieldEditor component (/app)", () => {
   const bloodGroupField: ApiGuardianField = {
@@ -208,5 +215,185 @@ describe("PreviewNav component (/app)", () => {
 
     expect(screen.queryByTestId("preview-nav")).toBeNull();
     expect(screen.queryByText("Alerts")).toBeNull();
+  });
+});
+
+describe("TagLifecyclePanel component (/app)", () => {
+  it("claims a tag and shows it ready for server-checked activation", async () => {
+    const user = userEvent.setup();
+    const onClaimTag = vi.fn().mockResolvedValue({ code: "SS-ABCD-EFGH" });
+    const onActivateTag = vi.fn().mockResolvedValue({ code: "SS-ABCD-EFGH", status: "active" });
+    const { rerender } = render(
+      <TagLifecyclePanel
+        assignedTags={[]}
+        disabled={false}
+        onClaimTag={onClaimTag}
+        onActivateTag={onActivateTag}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("Tag code"), "ss-abcd-efgh");
+    await user.type(screen.getByLabelText("One-time activation PIN"), "abc123");
+    await user.click(screen.getByRole("button", { name: "CLAIM TAG" }));
+
+    expect(onClaimTag).toHaveBeenCalledWith("SS-ABCD-EFGH", "ABC123");
+    expect(await screen.findByText(/SS-ABCD-EFGH is claimed/i)).toBeInTheDocument();
+
+    rerender(
+      <TagLifecyclePanel
+        assignedTags={[{ code: "SS-ABCD-EFGH", form: "band", status: "assigned" }]}
+        disabled={false}
+        onClaimTag={onClaimTag}
+        onActivateTag={onActivateTag}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "ACTIVATE" }));
+
+    expect(onActivateTag).toHaveBeenCalledWith("SS-ABCD-EFGH");
+    expect(await screen.findByText(/SS-ABCD-EFGH is active/i)).toBeInTheDocument();
+  });
+
+  it("shows the server activation gate error without claiming the tag active", async () => {
+    const user = userEvent.setup();
+    const onActivateTag = vi
+      .fn()
+      .mockRejectedValue(
+        new Error("Cannot activate tag: no public-released field contains profile data."),
+      );
+    render(
+      <TagLifecyclePanel
+        assignedTags={[{ code: "SS-ABCD-EFGH", form: "band", status: "assigned" }]}
+        disabled={false}
+        onClaimTag={vi.fn()}
+        onActivateTag={onActivateTag}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "ACTIVATE" }));
+
+    expect(
+      await screen.findByText(/no public-released field contains profile data/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/is active/i)).toBeNull();
+  });
+});
+
+describe("ConsentWithdrawalPanel component (/app)", () => {
+  it("keeps the withdraw button disabled until explicit confirmation checkbox is checked", async () => {
+    const user = userEvent.setup();
+    const onWithdraw = vi.fn().mockResolvedValue({ status: "withdrawn", visibility: "private" });
+
+    render(
+      <ConsentWithdrawalPanel disabled={false} publicFieldCount={2} onWithdraw={onWithdraw} />,
+    );
+
+    const withdrawBtn = screen.getByRole("button", { name: /WITHDRAW ALL PUBLIC RELEASES/i });
+    expect(withdrawBtn).toBeDisabled();
+
+    const checkbox = screen.getByRole("checkbox");
+    expect(checkbox).not.toBeChecked();
+
+    await user.click(checkbox);
+    expect(checkbox).toBeChecked();
+    expect(withdrawBtn).toBeEnabled();
+
+    await user.click(withdrawBtn);
+    expect(onWithdraw).toHaveBeenCalledTimes(1);
+    expect(
+      await screen.findByText(/All public disclosures have been withdrawn/i),
+    ).toBeInTheDocument();
+    expect(checkbox).not.toBeChecked();
+  });
+
+  it("handles server failure honestly and does not display success notice", async () => {
+    const user = userEvent.setup();
+    const onWithdraw = vi
+      .fn()
+      .mockRejectedValue(new Error("Database connection failure during atomic rollback"));
+
+    render(
+      <ConsentWithdrawalPanel disabled={false} publicFieldCount={1} onWithdraw={onWithdraw} />,
+    );
+
+    await user.click(screen.getByRole("checkbox"));
+    const withdrawBtn = screen.getByRole("button", { name: /WITHDRAW ALL PUBLIC RELEASES/i });
+    await user.click(withdrawBtn);
+
+    expect(
+      await screen.findByText(/Database connection failure during atomic rollback/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/All public disclosures have been withdrawn/i)).toBeNull();
+  });
+});
+
+describe("ConsentAuditTimeline component (/app)", () => {
+  it("renders honest empty state when no audit events exist", () => {
+    render(<ConsentAuditTimeline auditEntries={[]} pending={false} error={null} />);
+
+    expect(
+      screen.getByText(/No consent modifications recorded for this ward yet/i),
+    ).toBeInTheDocument();
+  });
+
+  it("renders chronological audit entries with readable field labels and appropriate badges", () => {
+    const entries: ApiConsentAuditEntry[] = [
+      {
+        eventType: "public_release_withdrawn",
+        createdAt: "2026-09-20T12:00:00Z",
+      },
+      {
+        eventType: "visibility_changed",
+        fieldKey: "blood_group",
+        oldVisibility: "private",
+        newVisibility: "public",
+        createdAt: "2026-09-20T11:30:00Z",
+      },
+      {
+        eventType: "visibility_changed",
+        fieldKey: "allergy",
+        oldVisibility: "public",
+        newVisibility: "private",
+        createdAt: "2026-09-20T11:00:00Z",
+      },
+    ];
+
+    render(<ConsentAuditTimeline auditEntries={entries} pending={false} error={null} />);
+
+    expect(screen.getByText("All public fields")).toBeInTheDocument();
+    expect(screen.getByText("All public releases withdrawn")).toBeInTheDocument();
+
+    expect(screen.getByText("Blood group")).toBeInTheDocument();
+    expect(screen.getByText("Released publicly")).toBeInTheDocument();
+
+    expect(screen.getByText("Allergies")).toBeInTheDocument();
+    expect(screen.getByText("Set to private")).toBeInTheDocument();
+  });
+
+  it("renders loading and error states cleanly", () => {
+    const { rerender } = render(
+      <ConsentAuditTimeline auditEntries={[]} pending={true} error={null} />,
+    );
+    expect(screen.getByText(/Loading consent history/i)).toBeInTheDocument();
+
+    rerender(
+      <ConsentAuditTimeline
+        auditEntries={[]}
+        pending={false}
+        error={new Error("Network timeout loading audit log")}
+      />,
+    );
+    expect(screen.getByText(/Network timeout loading audit log/i)).toBeInTheDocument();
+  });
+});
+
+describe("formatFieldKey", () => {
+  it("formats known catalog field keys to readable human titles", () => {
+    expect(formatFieldKey("age_band")).toBe("Age band");
+    expect(formatFieldKey("primary_language")).toBe("Primary language");
+    expect(formatFieldKey("blood_group")).toBe("Blood group");
+    expect(formatFieldKey("allergy")).toBe("Allergies");
+    expect(formatFieldKey("condition_flags")).toBe("Condition flags");
+    expect(formatFieldKey("condition_notes")).toBe("Condition notes");
+    expect(formatFieldKey(undefined)).toBe("All public fields");
   });
 });

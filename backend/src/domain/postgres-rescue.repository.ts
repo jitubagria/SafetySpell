@@ -177,18 +177,19 @@ export class PostgresRescueRepository implements RescueRepository {
     tenantId: string | undefined,
     wardId: string,
   ): Promise<WardTag[]> {
-    // Authorisation is enforced in the join: only a guardian's own active tags surface,
-    // and only the opaque code + form are returned — never ward data.
+    // Authorisation is enforced in the join: only a guardian's own assigned/active tags
+    // surface, and only opaque code, form, and lifecycle status are returned — never ward data.
     const result = await this.db.query<Row>(
-      `SELECT t.code, t.form FROM tags t
+      `SELECT t.code, t.form, t.inventory_status FROM tags t
        JOIN ward_guardians g ON g.ward_id = t.ward_id AND g.user_id = $1 AND g.tenant_id = $2 AND g.active = true
-       WHERE t.ward_id = $3 AND t.tenant_id = $2 AND t.inventory_status = 'active'
+       WHERE t.ward_id = $3 AND t.tenant_id = $2 AND t.inventory_status IN ('assigned', 'active')
        ORDER BY t.created_at`,
       [userId, tenantId, wardId],
     );
     return result.rows.map((row) => ({
       code: asString(row, "code"),
       form: asString(row, "form"),
+      status: asString(row, "inventory_status") as "assigned" | "active",
     }));
   }
 
