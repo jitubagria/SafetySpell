@@ -3,6 +3,7 @@ import { RESCUE_REPOSITORY, RescueRepository } from "../domain/rescue.repository
 import { isValidPublicTagCode, normalizeTagCode } from "../domain/tag-code";
 import { PublicScanResponse } from "../domain/types";
 import { ScanLogIpHasher } from "./scan-log-ip-hasher";
+import { isPublicScanKillEnabled } from "./scan-kill-switch";
 
 @Injectable()
 export class ScanResolverService {
@@ -14,6 +15,10 @@ export class ScanResolverService {
   ) {}
 
   async resolve(tagCode: string, ip?: string): Promise<PublicScanResponse> {
+    // Level-2 Dark: do not query a tag, its projection, or write a scan log.
+    // The response intentionally matches every other unavailable-tag response.
+    if (isPublicScanKillEnabled()) return { status: "tag_unavailable" };
+
     try {
       const normalizedCode = normalizeTagCode(tagCode);
       // A bad short-code checksum is neutral and is rejected before the database.

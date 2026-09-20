@@ -10,6 +10,7 @@ import {
   downloadAdminBatchPdf,
   downloadAdminTagPng,
   login,
+  revokeAdminTag,
   type ApiTagBatch,
 } from "@/lib/core-api";
 
@@ -252,6 +253,75 @@ function TagBatchPanel({ token }: { token: string }) {
           </Button>
         </section>
       ) : null}
+      <TagRevokePanel token={token} />
+    </section>
+  );
+}
+
+export function TagRevokePanel({ token }: { token: string }) {
+  const [tagCode, setTagCode] = useState("");
+  const [acknowledged, setAcknowledged] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const [pending, setPending] = useState(false);
+
+  async function revoke(event: FormEvent) {
+    event.preventDefault();
+    if (!acknowledged || !tagCode.trim()) return;
+    setPending(true);
+    setError("");
+    try {
+      const result = await revokeAdminTag(token, tagCode.trim());
+      setMessage(
+        result.alreadyRevoked
+          ? `${result.code} was already revoked.`
+          : `${result.code} revoked. Public scans now return the neutral unavailable response.`,
+      );
+    } catch (failure) {
+      setMessage("");
+      setError(adminErrorMessage(failure));
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <section className="mt-10 max-w-md border-t pt-6" aria-labelledby="tag-revoke-title">
+      <h3 id="tag-revoke-title" className="text-lg font-bold">
+        Emergency tag revoke
+      </h3>
+      <p className="mt-2 text-sm text-muted-foreground">
+        Permanently revoke one exact tag code. It cannot activate or resolve publicly afterwards.
+      </p>
+      <form className="mt-4 grid gap-3" onSubmit={revoke}>
+        <label className="grid gap-1 text-sm font-semibold">
+          Tag code
+          <input
+            value={tagCode}
+            onChange={(event) => setTagCode(event.target.value)}
+            placeholder="SS-XXXX-XXXX"
+            autoCapitalize="characters"
+            required
+          />
+        </label>
+        <label className="flex items-start gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={acknowledged}
+            onChange={(event) => setAcknowledged(event.target.checked)}
+          />
+          I understand this is permanent and immediately disables this tag's public scan.
+        </label>
+        <Button
+          type="submit"
+          variant="destructive"
+          disabled={pending || !acknowledged || !tagCode.trim()}
+        >
+          {pending ? "Revoking…" : "Revoke this tag"}
+        </Button>
+      </form>
+      {message ? <p className="mt-3 text-sm font-semibold text-emerald-700">{message}</p> : null}
+      {error ? <p className="mt-3 text-sm font-semibold text-destructive">{error}</p> : null}
     </section>
   );
 }

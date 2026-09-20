@@ -61,10 +61,28 @@ const testTables = [
   "users",
 ].join(", ");
 
+async function rehydrateConditionCatalog() {
+  // Truncating users cascades through field_catalog.approved_by. Rehydrate the two
+  // migration-owned condition definitions so every test starts from the fresh-DB
+  // catalog contract rather than depending on test execution order.
+  await db.query(`
+    INSERT INTO field_catalog (
+      category, field_key, label, data_type, max_level, public_eligible,
+      approved, provenance_required, guardian_editable, validation_policy
+    ) VALUES
+      ('medical', 'condition_flags', 'Condition flags', 'enum', 'public', true, true, true, true,
+       '{"allowed_values":["epilepsy","cardiac","diabetes","blood_thinner","dialysis","pacemaker_implant","severe_allergy","asthma_copd","non_verbal","hearing_impaired","vision_impaired","wandering"],"multi_select":true}'::jsonb),
+      ('medical', 'condition_notes', 'Condition notes', 'text', 'public', true, true, true, true,
+       '{"max_length":1000}'::jsonb)
+    ON CONFLICT (category, field_key) DO NOTHING
+  `);
+}
+
 async function resetDatabase() {
   await db.query("DROP TRIGGER IF EXISTS integration_fail_withdrawal_trigger ON consent_audit");
   await db.query("DROP FUNCTION IF EXISTS integration_fail_withdrawal()");
   await db.query(`TRUNCATE ${testTables} RESTART IDENTITY CASCADE`);
+  await rehydrateConditionCatalog();
 }
 
 async function seed(
@@ -357,6 +375,7 @@ beforeAll(async () => {
     "024_route_stage_tenant_roles_and_hop_authority.sql",
     "025_stage_change_event_pair_backstop.sql",
   ]);
+  await rehydrateConditionCatalog();
   const conditionFields = await db.query(
     "SELECT field_key, validation_policy FROM field_catalog WHERE category = 'medical' AND field_key IN ('condition_flags', 'condition_notes') ORDER BY field_key",
   );
@@ -870,6 +889,34 @@ describe("Rescue ID live PostgreSQL integration boundary", () => {
     expect(notes).toContain("Plain note");
   });
 
+  it("darkens every public scan without querying or logging when SCAN_KILL=true", async () => {
+    const data = await seed({ visibility: "public" });
+    const originalKill = process.env.SCAN_KILL;
+    process.env.SCAN_KILL = "true";
+    try {
+      // More than both normal per-code and per-IP limits proves dark mode avoids
+      // variable 429 responses as well as withholding the active tag's data.
+      for (let count = 0; count < 31; count += 1) {
+        await request(app.getHttpServer())
+          .get(`/v1/public/scan/${data.tagCode}`)
+          .expect(200)
+          .expect({ status: "tag_unavailable" });
+      }
+      await request(app.getHttpServer())
+        .get(`/v1/public/scan/${createPublicTagCode()}`)
+        .expect(200)
+        .expect({ status: "tag_unavailable" });
+      const scans = await db.query(
+        "SELECT count(*)::int AS count FROM scan_log WHERE tag_id = (SELECT id FROM tags WHERE code = $1)",
+        [data.tagCode],
+      );
+      expect(scans.rows[0].count).toBe(0);
+    } finally {
+      if (originalKill === undefined) delete process.env.SCAN_KILL;
+      else process.env.SCAN_KILL = originalKill;
+    }
+  });
+
   it("records a keyed IP pseudonym but never raw scan data in PostgreSQL", async () => {
     const data = await seed();
     await request(app.getHttpServer()).get(`/v1/public/scan/${data.tagCode}`).expect(200);
@@ -945,6 +992,81 @@ describe("Rescue ID live PostgreSQL integration boundary", () => {
       );
     }
     expect(statuses).toContain(429);
+  });
+
+  it("allows only an admin to revoke one tenant tag, records it once, and darkens its public scan", async () => {
+    const data = await seed({ visibility: "public" });
+    const adminId = randomUUID();
+    const password = "revoke-admin-password";
+    const email = `${adminId}@example.test`;
+    await db.query(
+      "INSERT INTO users(id, name, email, password_hash, role) VALUES ($1, 'Revoke admin', $2, $3, 'company_admin')",
+      [adminId, email, await bcrypt.hash(password, 4)],
+    );
+    const adminToken = await tokenForCredentials(email, password);
+
+    const activeScan = await request(app.getHttpServer())
+      .get(`/v1/public/scan/${data.tagCode}`)
+      .expect(200);
+    expect(activeScan.body).toMatchObject({ status: "available" });
+    await request(app.getHttpServer())
+      .post(`/v1/admin/tags/${data.tagCode}/revoke`)
+      .expect(401);
+    await request(app.getHttpServer())
+      .post(`/v1/admin/tags/${data.tagCode}/revoke`)
+      .set("Authorization", `Bearer ${await tokenFor(data)}`)
+      .expect(403);
+    await request(app.getHttpServer())
+      .post(`/v1/admin/tags/${randomUUID().replaceAll("-", "")}/revoke`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .expect(404);
+    const otherTenantId = (
+      await db.query<{ id: string }>(
+        "INSERT INTO tenants(name, type) VALUES($1, 'hospital') RETURNING id",
+        [`Revoke other tenant ${randomUUID()}`],
+      )
+    ).rows[0]!.id;
+    const otherTenantTag = await seed({ tenantId: otherTenantId, visibility: "public" });
+    await request(app.getHttpServer())
+      .post(`/v1/admin/tags/${otherTenantTag.tagCode}/revoke`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .expect(404);
+
+    await request(app.getHttpServer())
+      .post(`/v1/admin/tags/${data.tagCode.toLowerCase()}/revoke`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .expect(201)
+      .expect({ code: data.tagCode, status: "revoked", alreadyRevoked: false });
+    expect(
+      (
+        await db.query("SELECT inventory_status, status FROM tags WHERE code = $1", [data.tagCode])
+      ).rows,
+    ).toEqual([{ inventory_status: "revoked", status: "revoked" }]);
+    await request(app.getHttpServer())
+      .get(`/v1/public/scan/${data.tagCode}`)
+      .expect(200)
+      .expect({ status: "tag_unavailable" });
+
+    await request(app.getHttpServer())
+      .post(`/v1/admin/tags/${data.tagCode}/revoke`)
+      .set("Authorization", `Bearer ${adminToken}`)
+      .expect(201)
+      .expect({ code: data.tagCode, status: "revoked", alreadyRevoked: true });
+    expect(
+      (
+        await db.query(
+          "SELECT event_type, from_status, to_status, metadata FROM tag_events WHERE tag_id = (SELECT id FROM tags WHERE code = $1)",
+          [data.tagCode],
+        )
+      ).rows,
+    ).toEqual([
+      {
+        event_type: "revoked",
+        from_status: "active",
+        to_status: "revoked",
+        metadata: { method: "company_admin_revoke" },
+      },
+    ]);
   });
 
   it("allows only an admin to mint a blank batch with short checksummed immutable codes", async () => {
@@ -1101,20 +1223,17 @@ describe("Rescue ID live PostgreSQL integration boundary", () => {
     }
   }, 30_000);
 
-  // Known defect, intentionally not fixed in this test-only slice: the unvalidated parameter
-  // reaches PostgreSQL, which responds 500 instead of a clean client error. Remove `.failing`
-  // when controller-level UUID validation is added.
-  it.failing("rejects a malformed batch id with a clean client error", async () => {
+  it("rejects a malformed batch id with a clean client error", async () => {
     const adminId = randomUUID();
     await db.query(
       "INSERT INTO users(id, name, email, password_hash, role) VALUES ($1, 'Malformed ID admin', $2, $3, 'company_admin')",
       [adminId, `${adminId}@example.test`, await bcrypt.hash("malformed-id-password", 4)],
     );
     const token = await tokenForCredentials(`${adminId}@example.test`, "malformed-id-password");
-    const response = await request(app.getHttpServer())
+    await request(app.getHttpServer())
       .get("/v1/admin/tag-batches/not-a-uuid/print.pdf")
-      .set("Authorization", `Bearer ${token}`);
-    expect(response.status).toBeLessThan(500);
+      .set("Authorization", `Bearer ${token}`)
+      .expect(400);
   });
 
   it("allocates only company-held blank batch stock and enforces distributor custody", async () => {

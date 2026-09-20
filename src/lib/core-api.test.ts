@@ -7,6 +7,7 @@ import {
   setVisibility,
   claimTag,
   activateTag,
+  revokeAdminTag,
   login,
 } from "./core-api";
 
@@ -203,6 +204,26 @@ describe("core-api", () => {
         expect.stringContaining("/v1/app/wards/ward-123/tags/SS-DEMO-0001/activate"),
         expect.objectContaining({
           method: "POST",
+        }),
+      );
+    });
+
+    it("revokeAdminTag posts the exact encoded tag code with admin authentication", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ code: "SS-DEMO-0001", status: "revoked", alreadyRevoked: false }),
+      });
+
+      await expect(revokeAdminTag("admin-token", "SS-DEMO/0001")).resolves.toEqual({
+        code: "SS-DEMO-0001",
+        status: "revoked",
+        alreadyRevoked: false,
+      });
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining("/v1/admin/tags/SS-DEMO%2F0001/revoke"),
+        expect.objectContaining({
+          method: "POST",
+          headers: expect.objectContaining({ Authorization: "Bearer admin-token" }),
         }),
       );
     });

@@ -264,6 +264,13 @@ export function downloadAdminBatchPdf(token: string, batchId: string): Promise<B
   );
 }
 
+export function revokeAdminTag(
+  token: string,
+  tagCode: string,
+): Promise<{ code: string; status: "revoked"; alreadyRevoked: boolean }> {
+  return call(`/v1/admin/tags/${encodeURIComponent(tagCode)}/revoke`, { method: "POST" }, token);
+}
+
 export type ApiTenantRoleAuthorityClass =
   "unprivileged" | "operational_staff" | "guardian" | "admin";
 

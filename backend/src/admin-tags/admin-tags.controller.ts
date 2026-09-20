@@ -1,4 +1,14 @@
-import { Body, Controller, Get, Header, Param, Post, Res, UseGuards } from "@nestjs/common";
+import {
+  Body,
+  Controller,
+  Get,
+  Header,
+  Param,
+  ParseUUIDPipe,
+  Post,
+  Res,
+  UseGuards,
+} from "@nestjs/common";
 import { IsIn, IsInt, IsString, Max, Min } from "class-validator";
 import { Response } from "express";
 import {
@@ -31,7 +41,7 @@ export class AdminTagsController {
   }
   @Get(":batchId/print.pdf") @Header("Content-Type", "application/pdf") async pdf(
     @CurrentUser() user: AuthenticatedUser,
-    @Param("batchId") id: string,
+    @Param("batchId", new ParseUUIDPipe({ version: "4" })) id: string,
     @Res() response: Response,
   ) {
     response.send(await this.tags.pdf(user, id));

@@ -1,4 +1,7 @@
 import { Module } from "@nestjs/common";
-/** Tag lifecycle is intentionally internal in V1; public access is ScanResolver only. */
-@Module({})
+import { TagRevocationController } from "./tag-revocation.controller";
+import { TagRevocationService } from "./tag-revocation.service";
+
+/** Public access remains ScanResolver-only; company admins may revoke a specific tag. */
+@Module({ controllers: [TagRevocationController], providers: [TagRevocationService] })
 export class TagLifecycleModule {}

@@ -1,9 +1,15 @@
-import { Module } from "@nestjs/common";
+import { ExecutionContext, Module } from "@nestjs/common";
 import { ConfigModule, ConfigService } from "@nestjs/config";
 import { APP_GUARD } from "@nestjs/core";
 import { ThrottlerModule, ThrottlerStorage } from "@nestjs/throttler";
 import { RedisThrottlerStorage } from "./redis-throttler.storage";
 import { SafetySpellThrottlerGuard } from "./safetyspell-throttler.guard";
+import { isPublicScanKillEnabled } from "../scan-resolver/scan-kill-switch";
+
+function isPublicScanRequest(context: ExecutionContext): boolean {
+  const request = context.switchToHttp().getRequest<{ path?: string }>();
+  return request.path?.startsWith("/v1/public/scan/") ?? false;
+}
 
 function scanCodeTracker(request: Record<string, unknown>): string {
   const params = request.params;
@@ -25,15 +31,21 @@ function scanCodeTracker(request: Record<string, unknown>): string {
           (process.env.NODE_ENV === "test" ? 100 : 10);
 
         return [
-          { name: "default", ttl: 60_000, limit: defaultLimit },
+          {
+            name: "default",
+            ttl: 60_000,
+            limit: defaultLimit,
+            // Dark mode must always return the resolver's neutral 200 response,
+            // rather than a rate-limit response that varies by recent traffic.
+            skipIf: (context) => isPublicScanKillEnabled() && isPublicScanRequest(context),
+          },
           {
             name: "scanCode",
             ttl: 60_000,
             limit: scanCodeLimit,
             getTracker: scanCodeTracker,
             skipIf: (context) => {
-              const request = context.switchToHttp().getRequest<{ path?: string }>();
-              return !request.path?.startsWith("/v1/public/scan/");
+              return isPublicScanKillEnabled() || !isPublicScanRequest(context);
             },
           },
           {

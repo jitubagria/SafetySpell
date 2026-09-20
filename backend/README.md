@@ -58,6 +58,14 @@ npm test
 
 The public scan endpoint is rate-limited (30 requests/IP/minute). Scan logs use a separate keyed HMAC secret for optional IP pseudonymisation; they never retain raw IPs. If that secret is absent, the IP-derived log field is omitted rather than falling back to a reversible hash or raw IP.
 
+## Emergency public-scan kill switch
+
+Set `SCAN_KILL=true` in the deployed backend environment and restart/redeploy the API to enter **Level-2 Dark** mode. Every `GET /v1/public/scan/:tagCode` then returns the normal neutral `{ "status": "tag_unavailable" }` response without querying tag data or writing a scan log. Public scan throttles are deliberately skipped in this mode so recent traffic cannot make the response differ. This is a deployment-only control; no browser or API caller can enable it. Remove the setting and redeploy only after the approved incident-restoration procedure.
+
+Company admins can permanently revoke one tenant-scoped tag through `POST /v1/admin/tags/:tagCode/revoke`. It changes canonical `inventory_status` to `revoked`, records one immutable `tag_events` entry, and makes that tag's public scan neutral. Retrying an already revoked code is safe and returns `alreadyRevoked: true` without another event.
+
+The company-admin A4 batch-print endpoint, `GET /v1/admin/tag-batches/:batchId/print.pdf`, accepts UUID v4 batch IDs only. A malformed ID is rejected as `400 Bad Request` at the HTTP boundary; an unknown valid batch remains `404`.
+
 ## Important endpoint groups
 
 - `POST /v1/auth/login`
