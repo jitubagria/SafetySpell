@@ -1,9 +1,13 @@
+// These tests verify server-generated PDF bytes and data passed to PDF/QR generators.
+// They cannot prove a phone camera scans a printed A4 sheet; that remains a separate manual test.
 import "reflect-metadata";
 import { randomUUID } from "node:crypto";
 import * as bcrypt from "bcrypt";
 import { INestApplication } from "@nestjs/common";
 import { Test } from "@nestjs/testing";
+import { PDFDocument, PDFPage } from "pdf-lib";
 import { Pool } from "pg";
+import * as QRCode from "qrcode";
 import * as request from "supertest";
 import { AppModule } from "../src/app.module";
 import { configureApi } from "../src/bootstrap";
@@ -994,6 +998,124 @@ describe("Rescue ID live PostgreSQL integration boundary", () => {
       ]),
     ).rejects.toThrow("tag codes are immutable");
   }, 30_000);
+
+  it("generates an A4 PDF sheet with ten tags per page and canonical Level-H QR inputs", async () => {
+    const originalScanBase = process.env.PUBLIC_SCAN_BASE_URL;
+    process.env.PUBLIC_SCAN_BASE_URL = "https://safetyspell.example.test";
+    const fixtureQr = await QRCode.toBuffer("https://fixture.invalid/scan?tag=SS-AAAA-AAAA", {
+      errorCorrectionLevel: "H",
+      margin: 2,
+      width: 360,
+    });
+    const qrSpy = jest.spyOn(QRCode, "toBuffer") as unknown as jest.MockedFunction<
+      (text: string | QRCode.QRCodeSegment[], options?: QRCode.QRCodeToBufferOptions) => Promise<Buffer>
+    >;
+    qrSpy.mockResolvedValue(fixtureQr);
+    const drawTextSpy = jest.spyOn(PDFPage.prototype, "drawText");
+    try {
+      const adminId = randomUUID();
+      await db.query(
+        "INSERT INTO users(id, name, email, password_hash, role) VALUES ($1, 'Print admin', $2, $3, 'company_admin')",
+        [adminId, `${adminId}@example.test`, await bcrypt.hash("print-admin-password", 4)],
+      );
+      const adminToken = await tokenForCredentials(
+        `${adminId}@example.test`,
+        "print-admin-password",
+      );
+      const batch = await request(app.getHttpServer())
+        .post("/v1/admin/tag-batches")
+        .set("Authorization", `Bearer ${adminToken}`)
+        .send({ categoryKey: "medical", form: "band", quantity: 11 })
+        .expect(201);
+      const codes = batch.body.codes as string[];
+      expect(codes).toHaveLength(11);
+
+      const pdfResponse = await request(app.getHttpServer())
+        .get(`/v1/admin/tag-batches/${batch.body.id}/print.pdf`)
+        .set("Authorization", `Bearer ${adminToken}`)
+        .expect("Content-Type", /application\/pdf/)
+        .expect(200);
+      expect(Buffer.isBuffer(pdfResponse.body)).toBe(true);
+      expect(pdfResponse.body.length).toBeGreaterThan(4);
+      expect(pdfResponse.body.subarray(0, 4).toString()).toBe("%PDF");
+
+      const parsedPdf = await PDFDocument.load(pdfResponse.body);
+      expect(parsedPdf.getPages()).toHaveLength(2);
+      for (const page of parsedPdf.getPages()) {
+        expect(page.getWidth()).toBeCloseTo((210 * 72) / 25.4, 4);
+        expect(page.getHeight()).toBeCloseTo((297 * 72) / 25.4, 4);
+      }
+
+      const expectedUrls = codes.map(
+        (code) => `https://safetyspell.example.test/scan?tag=${encodeURIComponent(code)}`,
+      ).sort();
+      const sheetQrCalls = qrSpy.mock.calls.flatMap(([value, options]) =>
+        typeof value === "string" && expectedUrls.includes(value) ? [{ value, options }] : [],
+      );
+      expect(sheetQrCalls).toHaveLength(codes.length);
+      expect(sheetQrCalls.map(({ value }) => value)).toEqual(expectedUrls);
+      for (const { options } of sheetQrCalls) {
+        expect(options).toMatchObject({ errorCorrectionLevel: "H" });
+      }
+
+      const renderedBackupCodes = drawTextSpy.mock.calls
+        .map(([text]) => text)
+        .filter((text): text is string => typeof text === "string" && codes.includes(text));
+      expect(renderedBackupCodes).toEqual([...codes].sort());
+
+      await request(app.getHttpServer())
+        .get(`/v1/admin/tag-batches/${batch.body.id}/print.pdf`)
+        .expect(401);
+      const guardian = await seed();
+      const guardianToken = await tokenFor(guardian);
+      await request(app.getHttpServer())
+        .get(`/v1/admin/tag-batches/${batch.body.id}/print.pdf`)
+        .set("Authorization", `Bearer ${guardianToken}`)
+        .expect(403);
+      await request(app.getHttpServer())
+        .get(`/v1/admin/tag-batches/${randomUUID()}/print.pdf`)
+        .set("Authorization", `Bearer ${adminToken}`)
+        .expect(404);
+
+      const emptyBatchId = randomUUID();
+      const tenant = await db.query<{ tenant_id: string }>("SELECT tenant_id FROM users WHERE id = $1", [
+        adminId,
+      ]);
+      const category = await db.query<{ id: string }>(
+        "SELECT id FROM categories WHERE key = 'medical'",
+      );
+      await db.query(
+        `INSERT INTO tag_batches(id, batch_code, category_id, form, quantity, created_by_user_id, tenant_id)
+         VALUES($1, $2, $3, 'band', 1, $4, $5)`,
+        [emptyBatchId, `B-EMPTY-${randomUUID()}`, category.rows[0]!.id, adminId, tenant.rows[0]!.tenant_id],
+      );
+      await request(app.getHttpServer())
+        .get(`/v1/admin/tag-batches/${emptyBatchId}/print.pdf`)
+        .set("Authorization", `Bearer ${adminToken}`)
+        .expect(404);
+    } finally {
+      qrSpy.mockRestore();
+      drawTextSpy.mockRestore();
+      if (originalScanBase === undefined) delete process.env.PUBLIC_SCAN_BASE_URL;
+      else process.env.PUBLIC_SCAN_BASE_URL = originalScanBase;
+    }
+  }, 30_000);
+
+  // Known defect, intentionally not fixed in this test-only slice: the unvalidated parameter
+  // reaches PostgreSQL, which responds 500 instead of a clean client error. Remove `.failing`
+  // when controller-level UUID validation is added.
+  it.failing("rejects a malformed batch id with a clean client error", async () => {
+    const adminId = randomUUID();
+    await db.query(
+      "INSERT INTO users(id, name, email, password_hash, role) VALUES ($1, 'Malformed ID admin', $2, $3, 'company_admin')",
+      [adminId, `${adminId}@example.test`, await bcrypt.hash("malformed-id-password", 4)],
+    );
+    const token = await tokenForCredentials(`${adminId}@example.test`, "malformed-id-password");
+    const response = await request(app.getHttpServer())
+      .get("/v1/admin/tag-batches/not-a-uuid/print.pdf")
+      .set("Authorization", `Bearer ${token}`);
+    expect(response.status).toBeLessThan(500);
+  });
 
   it("allocates only company-held blank batch stock and enforces distributor custody", async () => {
     const adminId = randomUUID();
