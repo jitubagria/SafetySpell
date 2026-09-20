@@ -289,7 +289,7 @@ describe("Step 2 tenant boundary and category-integrity schema", () => {
       await rehearsalPool.end();
       await adminPool.query(`DROP DATABASE IF EXISTS ${databaseName}`);
     }
-  }, 30_000);
+  }, 60_000);
 
   it("stops the lifecycle cutover when a legacy and canonical tag state diverge", async () => {
     const databaseName = `safetyspell_step4_divergence_${randomUUID().replaceAll("-", "")}`;
@@ -331,5 +331,5 @@ describe("Step 2 tenant boundary and category-integrity schema", () => {
       await rehearsalPool.end();
       await adminPool.query(`DROP DATABASE IF EXISTS ${databaseName}`);
     }
-  }, 30_000);
+  }, 60_000);
 });

@@ -37,13 +37,17 @@ export class AdminTagsController {
     @Param("tagCode") code: string,
     @Res() response: Response,
   ) {
-    response.send(await this.tags.png(user, code));
+    const buffer = await this.tags.png(user, code);
+    response.setHeader("Content-Length", String(buffer.length));
+    response.send(buffer);
   }
   @Get(":batchId/print.pdf") @Header("Content-Type", "application/pdf") async pdf(
     @CurrentUser() user: AuthenticatedUser,
     @Param("batchId", new ParseUUIDPipe({ version: "4" })) id: string,
     @Res() response: Response,
   ) {
-    response.send(await this.tags.pdf(user, id));
+    const buffer = await this.tags.pdf(user, id);
+    response.setHeader("Content-Length", String(buffer.length));
+    response.send(buffer);
   }
 }

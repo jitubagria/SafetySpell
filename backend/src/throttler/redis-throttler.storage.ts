@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger, OnModuleDestroy, Optional } from "@nestjs/common";
+import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit, Optional } from "@nestjs/common";
 import { ThrottlerStorage } from "@nestjs/throttler";
 import { ThrottlerStorageRecord } from "@nestjs/throttler/dist/throttler-storage-record.interface";
 import Redis, { RedisOptions } from "ioredis";
@@ -34,7 +34,7 @@ end
 `;
 
 @Injectable()
-export class RedisThrottlerStorage implements ThrottlerStorage, OnModuleDestroy {
+export class RedisThrottlerStorage implements ThrottlerStorage, OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(RedisThrottlerStorage.name);
   private readonly redisClient: Redis;
   private isConnected = false;
@@ -72,6 +72,22 @@ export class RedisThrottlerStorage implements ThrottlerStorage, OnModuleDestroy 
 
   public get isStoreConnected(): boolean {
     return this.isConnected;
+  }
+
+  public async onModuleInit(): Promise<void> {
+    if (!this.redisClient || typeof (this.redisClient as any).once !== "function") return;
+    if (this.redisClient.status === "ready") return;
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => resolve(), 2000);
+      (this.redisClient as any).once("ready", () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      (this.redisClient as any).once("error", () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
   }
 
   public async onModuleDestroy(): Promise<void> {

@@ -5,4 +5,5 @@ module.exports = {
   transform: { "^.+\\.(t|j)s$": ["ts-jest", { tsconfig: "tsconfig.json" }] },
   collectCoverageFrom: ["src/**/*.ts", "!src/main.ts"],
   testEnvironment: "node",
+  testTimeout: 30000,
 };

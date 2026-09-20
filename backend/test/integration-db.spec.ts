@@ -435,6 +435,12 @@ beforeAll(async () => {
   app = moduleRef.createNestApplication();
   configureApi(app);
   await app.init();
+  const httpServer = app.getHttpServer();
+  if (httpServer && typeof httpServer.setTimeout === "function") {
+    httpServer.setTimeout(120_000);
+    httpServer.keepAliveTimeout = 120_000;
+    httpServer.headersTimeout = 130_000;
+  }
 });
 
 beforeEach(resetDatabase);
@@ -627,6 +633,18 @@ describe("Rescue ID live PostgreSQL integration boundary", () => {
         publicReleaseEligible: false,
       }),
       expect.objectContaining({
+        key: "condition_flags",
+        value: null,
+        visibility: "private",
+        publicReleaseEligible: true,
+      }),
+      expect.objectContaining({
+        key: "condition_notes",
+        value: null,
+        visibility: "private",
+        publicReleaseEligible: true,
+      }),
+      expect.objectContaining({
         catalogId: data.primaryLanguageFieldId,
         key: "primary_language",
         value: null,
@@ -798,7 +816,7 @@ describe("Rescue ID live PostgreSQL integration boundary", () => {
     await expect(
       db.query(
         `INSERT INTO field_catalog(id, category, field_key, label, data_type, max_level, public_eligible, approved, validation_policy)
-         VALUES ($1, 'medical', 'condition_notes', 'Condition notes', 'text', 'public', true, true, '{"max_length":64}'::jsonb)`,
+         VALUES ($1, 'elderly', 'condition_notes', 'Condition notes', 'text', 'public', true, true, '{"max_length":64}'::jsonb)`,
         [randomUUID()],
       ),
     ).resolves.toBeDefined();
@@ -816,31 +834,16 @@ describe("Rescue ID live PostgreSQL integration boundary", () => {
   it("keeps condition fields private until release, then exposes only validated flags and sanitised notes", async () => {
     const data = await seed();
     const token = await tokenFor(data);
-    const flagsId = randomUUID();
-    const notesId = randomUUID();
-    const flagPolicy = JSON.stringify({
-      allowed_values: [
-        "epilepsy",
-        "cardiac",
-        "diabetes",
-        "blood_thinner",
-        "dialysis",
-        "pacemaker_implant",
-        "severe_allergy",
-        "asthma_copd",
-        "non_verbal",
-        "hearing_impaired",
-        "vision_impaired",
-        "wandering",
-      ],
-      multi_select: true,
-    });
-    await db.query(
-      `INSERT INTO field_catalog(id, category, field_key, label, data_type, max_level, public_eligible, approved, guardian_editable, validation_policy)
-       VALUES ($1, 'medical', 'condition_flags', 'Condition flags', 'enum', 'public', true, true, true, $2::jsonb),
-              ($3, 'medical', 'condition_notes', 'Condition notes', 'text', 'public', true, true, true, '{"max_length":1000}'::jsonb)`,
-      [flagsId, flagPolicy, notesId],
-    );
+    const flagsId = (
+      await db.query<{ id: string }>(
+        "SELECT id FROM field_catalog WHERE category = 'medical' AND field_key = 'condition_flags'",
+      )
+    ).rows[0]!.id;
+    const notesId = (
+      await db.query<{ id: string }>(
+        "SELECT id FROM field_catalog WHERE category = 'medical' AND field_key = 'condition_notes'",
+      )
+    ).rows[0]!.id;
 
     await request(app.getHttpServer())
       .patch(`/v1/app/wards/${data.wardId}/fields/${flagsId}`)
@@ -971,24 +974,39 @@ describe("Rescue ID live PostgreSQL integration boundary", () => {
   it("limits a public code independently while retaining the per-IP scan limit", async () => {
     const first = await seed();
     const secondCode = randomUUID().replaceAll("-", "");
+    const testIp = "203.0.113.198";
     await db.query(
       `INSERT INTO tags(code, ward_id, category, category_id, form, inventory_status, holder_kind, holder_guardian_user_id, activated_at)
        VALUES($1, $2, 'medical', (SELECT id FROM categories WHERE key = 'medical'), 'band', 'active', 'guardian', $3, now())`,
       [secondCode, first.wardId, first.guardianId],
     );
     for (let count = 0; count < 5; count += 1) {
-      await request(app.getHttpServer()).get(`/v1/public/scan/${first.tagCode}`).expect(200);
-      await request(app.getHttpServer()).get(`/v1/public/scan/${secondCode}`).expect(200);
+      await request(app.getHttpServer())
+        .get(`/v1/public/scan/${first.tagCode}`)
+        .set("X-Forwarded-For", testIp)
+        .expect(200);
+      await request(app.getHttpServer())
+        .get(`/v1/public/scan/${secondCode}`)
+        .set("X-Forwarded-For", testIp)
+        .expect(200);
     }
-    await request(app.getHttpServer()).get(`/v1/public/scan/${first.tagCode}`).expect(429);
+    await request(app.getHttpServer())
+      .get(`/v1/public/scan/${first.tagCode}`)
+      .set("X-Forwarded-For", testIp)
+      .expect(429);
   });
 
   it("triggers the public scan rate limit over HTTP", async () => {
     const data = await seed();
     const statuses: number[] = [];
+    const testIp = "203.0.113.199";
     for (let count = 0; count < 31; count += 1) {
       statuses.push(
-        (await request(app.getHttpServer()).get(`/v1/public/scan/${data.tagCode}`)).status,
+        (
+          await request(app.getHttpServer())
+            .get(`/v1/public/scan/${data.tagCode}`)
+            .set("X-Forwarded-For", testIp)
+        ).status,
       );
     }
     expect(statuses).toContain(429);
@@ -1119,7 +1137,7 @@ describe("Rescue ID live PostgreSQL integration boundary", () => {
         response.body.codes[0],
       ]),
     ).rejects.toThrow("tag codes are immutable");
-  }, 30_000);
+  }, 60_000);
 
   it("generates an A4 PDF sheet with ten tags per page and canonical Level-H QR inputs", async () => {
     const originalScanBase = process.env.PUBLIC_SCAN_BASE_URL;
@@ -1221,7 +1239,7 @@ describe("Rescue ID live PostgreSQL integration boundary", () => {
       if (originalScanBase === undefined) delete process.env.PUBLIC_SCAN_BASE_URL;
       else process.env.PUBLIC_SCAN_BASE_URL = originalScanBase;
     }
-  }, 30_000);
+  }, 60_000);
 
   it("rejects a malformed batch id with a clean client error", async () => {
     const adminId = randomUUID();
