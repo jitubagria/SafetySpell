@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { ConditionFlags } from "@/components/condition-flags";
 import { DemoGate } from "@/components/demo-gate";
 import { coreApiUrl, scanTag } from "@/lib/core-api";
+import { isProduction } from "@/lib/env";
 
 const categoryClass = (category?: string) =>
   category === "deaf_mute"
@@ -33,7 +34,7 @@ export const Route = createFileRoute("/scan")({
   component: PublicScan,
 });
 
-function PublicScan() {
+export function PublicScan() {
   const { tag } = Route.useSearch();
   const scan = useQuery({
     queryKey: ["public-scan", tag],
@@ -52,10 +53,13 @@ function PublicScan() {
           <p className="text-sm font-bold uppercase tracking-wide text-category">
             SafetySpell · public scan web
           </p>
-          <h1 className="mt-2 font-display text-4xl font-bold sm:text-5xl">Rescue ID demo</h1>
+          <h1 className="mt-2 font-display text-4xl font-bold sm:text-5xl">
+            {isProduction() ? "Rescue ID" : "Rescue ID demo"}
+          </h1>
           <p className="mt-3 max-w-xl text-lg text-muted-foreground">
-            Public information is fetched only from the configured local Core API after its
-            server-side consent filter runs.
+            {isProduction()
+              ? "Emergency information released by the guardian."
+              : "Public information is fetched only from the configured local Core API after its server-side consent filter runs."}
           </p>
         </header>
         <section className="border-y-2 border-category py-7" aria-labelledby="scan-result-title">
@@ -83,21 +87,23 @@ function PublicScan() {
             </div>
           </div>
         </section>
-        <div className="mt-auto space-y-3 pt-6">
-          <Button variant="emergency" className="w-full text-xl" type="button">
-            <Phone className="size-7" />
-            CALL FAMILY — DEMO ONLY
-          </Button>
-          <p className="text-center text-sm font-semibold text-muted-foreground">
-            Demo only — does nothing yet.
-          </p>
-        </div>
+        {!isProduction() ? (
+          <div className="mt-auto space-y-3 pt-6" data-testid="demo-call-action">
+            <Button variant="emergency" className="w-full text-xl" type="button">
+              <Phone className="size-7" />
+              CALL FAMILY — DEMO ONLY
+            </Button>
+            <p className="text-center text-sm font-semibold text-muted-foreground">
+              Demo only — does nothing yet.
+            </p>
+          </div>
+        ) : null}
       </main>
     </div>
   );
 }
 
-function ScanResult({
+export function ScanResult({
   tag,
   isConfigured,
   result,

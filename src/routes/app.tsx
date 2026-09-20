@@ -16,6 +16,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { DemoGate } from "@/components/demo-gate";
 import { WardTagQr } from "@/components/ward-tag-qr";
 import { conditionFlagDefinitions, knownConditionFlagKeys } from "@/lib/condition-flags";
+import { isProduction } from "@/lib/env";
 import {
   type ApiGuardianField,
   type ApiWardTag,
@@ -163,15 +164,18 @@ function GuardianApp() {
       data-category={categoryClass(selectedWard?.category) ?? "elderly"}
     >
       <DemoGate />
-      <main className="mx-auto min-h-[calc(100dvh-40px)] w-full max-w-3xl px-5 py-7 pb-28">
+      <main
+        className={`mx-auto min-h-[calc(100dvh-40px)] w-full max-w-3xl px-5 py-7 ${isProduction() ? "pb-10" : "pb-28"}`}
+      >
         <header>
           <p className="text-sm font-bold uppercase tracking-wide text-category">
             SafetySpell · guardian PWA
           </p>
           <h1 className="mt-1 font-display text-3xl font-bold">Guardian access</h1>
           <p className="mt-2 text-base text-muted-foreground">
-            Local Core API mode. Profile fields, condition flags, and condition notes are available
-            in this prototype.
+            {isProduction()
+              ? "Manage profile fields and emergency public consent for your wards."
+              : "Local Core API mode. Profile fields, condition flags, and condition notes are available in this prototype."}
           </p>
         </header>
         {!token ? (
@@ -473,7 +477,7 @@ function ConditionFlagsInput({
   );
 }
 
-function FieldEditor({
+export function FieldEditor({
   field,
   pending,
   onUpdateField,
@@ -570,9 +574,13 @@ function UnconfiguredApp() {
   );
 }
 
-function PreviewNav() {
+export function PreviewNav() {
+  if (isProduction()) {
+    return null;
+  }
   return (
     <nav
+      data-testid="preview-nav"
       className="fixed inset-x-0 bottom-0 z-10 mx-auto grid h-20 max-w-3xl grid-cols-4 border-t border-border bg-surface/95 px-2 pb-[env(safe-area-inset-bottom)] backdrop-blur"
       aria-label="Guardian app navigation preview"
     >
