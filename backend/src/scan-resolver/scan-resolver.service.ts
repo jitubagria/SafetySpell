@@ -34,9 +34,10 @@ export class ScanResolverService {
             ? await this.repository.getAssetPublicProjection(tag.assetId, tag.tenantId)
             : null;
       if (!projection) return { status: "tag_unavailable" };
-      // An asset is never a live public tag until at least one released
-      // allowlisted field has a value. Person consent behavior remains unchanged.
-      if (tag.categoryKind === "plain_asset" && projection.fields.length === 0) {
+      // Never distinguish an active tag whose subject has no currently released
+      // values from an unknown or inactive tag. Withdrawal must restore the
+      // same neutral public boundary immediately.
+      if (projection.fields.length === 0) {
         return { status: "tag_unavailable" };
       }
       await this.repository.writeScanLog({

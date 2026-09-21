@@ -2,7 +2,7 @@ import { ExecutionContext, Module } from "@nestjs/common";
 import { ConfigModule, ConfigService } from "@nestjs/config";
 import { APP_GUARD } from "@nestjs/core";
 import { ThrottlerModule, ThrottlerStorage } from "@nestjs/throttler";
-import { RedisThrottlerStorage } from "./redis-throttler.storage";
+import { REDIS_CLIENT_TOKEN, RedisThrottlerStorage } from "./redis-throttler.storage";
 import { SafetySpellThrottlerGuard } from "./safetyspell-throttler.guard";
 import { isPublicScanKillEnabled } from "../scan-resolver/scan-kill-switch";
 
@@ -65,6 +65,12 @@ function scanCodeTracker(request: Record<string, unknown>): string {
     }),
   ],
   providers: [
+    // Kept injectable so database integration tests can use the approved shared
+    // Redis mock without changing runtime Redis selection.
+    {
+      provide: REDIS_CLIENT_TOKEN,
+      useFactory: () => process.env.REDIS_URL,
+    },
     {
       provide: ThrottlerStorage,
       useClass: RedisThrottlerStorage,

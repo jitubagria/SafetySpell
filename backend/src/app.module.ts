@@ -15,6 +15,7 @@ import { TagCustodyModule } from "./tag-custody/tag-custody.module";
 import { TagAssignmentModule } from "./tag-assignment/tag-assignment.module";
 import { RouteConfigModule } from "./route-config/route-config.module";
 import { SafetySpellThrottlerModule } from "./throttler/throttler.module";
+import { StageTrackingModule } from "./stage-tracking/stage-tracking.module";
 import { WardGuardiansModule } from "./ward-guardians/ward-guardians.module";
 
 @Module({
@@ -44,6 +45,7 @@ import { WardGuardiansModule } from "./ward-guardians/ward-guardians.module";
     TagAssignmentModule,
     InventoryModule,
     RouteConfigModule,
+    StageTrackingModule,
     ScanResolverModule,
     ScanAuditModule,
     PrivacyNoticeModule,

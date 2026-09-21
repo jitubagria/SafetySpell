@@ -47,7 +47,7 @@ export class RouteConfigService {
     const result = await this.db.query(
       `INSERT INTO routes(tenant_id, name)
        VALUES($1, $2)
-       RETURNING id, tenant_id, name, active, created_at, updated_at`,
+       RETURNING id, tenant_id, name, active, start_stage_id, created_at, updated_at`,
       [tenantId, trimmedName],
     );
     return result.rows[0];
@@ -56,7 +56,7 @@ export class RouteConfigService {
   async listRoutes(actor: AuthenticatedUser) {
     const tenantId = this.requireTenantId(actor);
     const result = await this.db.query(
-      `SELECT r.id, r.tenant_id, r.name, r.active, r.created_at, r.updated_at,
+      `SELECT r.id, r.tenant_id, r.name, r.active, r.start_stage_id, r.created_at, r.updated_at,
               (SELECT count(*)::int FROM stages s WHERE s.route_id = r.id) AS stage_count,
               (SELECT count(*)::int FROM route_stage_hop_permissions h WHERE h.route_id = r.id AND h.active = true) AS active_hop_count
        FROM routes r
@@ -70,7 +70,7 @@ export class RouteConfigService {
   async getRoute(actor: AuthenticatedUser, routeId: string) {
     const tenantId = this.requireTenantId(actor);
     const routeResult = await this.db.query(
-      `SELECT id, tenant_id, name, active, created_at, updated_at
+      `SELECT id, tenant_id, name, active, start_stage_id, created_at, updated_at
        FROM routes
        WHERE id = $1 AND tenant_id = $2`,
       [routeId, tenantId],
@@ -109,8 +109,8 @@ export class RouteConfigService {
 
   async updateRoute(actor: AuthenticatedUser, routeId: string, dto: UpdateRouteDto) {
     const tenantId = this.requireTenantId(actor);
-    const existingResult = await this.db.query<{ id: string; name: string; active: boolean }>(
-      "SELECT id, name, active FROM routes WHERE id = $1 AND tenant_id = $2",
+    const existingResult = await this.db.query<{ id: string; name: string; active: boolean; start_stage_id: string | null }>(
+      "SELECT id, name, active, start_stage_id FROM routes WHERE id = $1 AND tenant_id = $2",
       [routeId, tenantId],
     );
     const existing = existingResult.rows[0];
@@ -130,14 +130,25 @@ export class RouteConfigService {
       }
     }
 
+    let newStartStageId = existing.start_stage_id;
+    if (dto.startStageId !== undefined) {
+      const stage = await this.db.query<{ id: string }>(
+        `SELECT id FROM stages
+         WHERE id = $1 AND route_id = $2 AND tenant_id = $3 AND active = true`,
+        [dto.startStageId, routeId, tenantId],
+      );
+      if (!stage.rowCount) throw new BadRequestException("Start stage must be an active stage on this route");
+      newStartStageId = dto.startStageId;
+    }
+
     if (dto.active === false) {
       return this.db.transaction(async (client) => {
         const updateRes = await client.query(
           `UPDATE routes
-           SET name = $3, active = false, updated_at = now()
+           SET name = $3, active = false, start_stage_id = $4, updated_at = now()
            WHERE id = $1 AND tenant_id = $2
-           RETURNING id, tenant_id, name, active, created_at, updated_at`,
-          [routeId, tenantId, newName],
+           RETURNING id, tenant_id, name, active, start_stage_id, created_at, updated_at`,
+          [routeId, tenantId, newName, newStartStageId],
         );
 
         // Cascade-deactivate child stages and hops (as active=false, not deleted)
@@ -171,10 +182,10 @@ export class RouteConfigService {
     const newActive = dto.active !== undefined ? dto.active : existing.active;
     const updateRes = await this.db.query(
       `UPDATE routes
-       SET name = $3, active = $4, updated_at = now()
+       SET name = $3, active = $4, start_stage_id = $5, updated_at = now()
        WHERE id = $1 AND tenant_id = $2
-       RETURNING id, tenant_id, name, active, created_at, updated_at`,
-      [routeId, tenantId, newName, newActive],
+       RETURNING id, tenant_id, name, active, start_stage_id, created_at, updated_at`,
+      [routeId, tenantId, newName, newActive, newStartStageId],
     );
     return updateRes.rows[0];
   }

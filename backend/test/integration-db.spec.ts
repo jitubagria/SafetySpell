@@ -5,6 +5,8 @@ import { randomUUID } from "node:crypto";
 import * as bcrypt from "bcrypt";
 import { INestApplication } from "@nestjs/common";
 import { Test } from "@nestjs/testing";
+import RedisMock from "ioredis-mock";
+import type Redis from "ioredis";
 import { PDFDocument, PDFPage } from "pdf-lib";
 import { Pool } from "pg";
 import * as QRCode from "qrcode";
@@ -14,6 +16,7 @@ import { configureApi } from "../src/bootstrap";
 import { createPublicTagCode, isValidPublicTagCode } from "../src/domain/tag-code";
 import { ScanResolverService } from "../src/scan-resolver/scan-resolver.service";
 import { TagCustodyService } from "../src/tag-custody/tag-custody.service";
+import { REDIS_CLIENT_TOKEN } from "../src/throttler/redis-throttler.storage";
 
 const databaseUrl = process.env.INTEGRATION_DATABASE_URL ?? process.env.DATABASE_URL;
 if (!databaseUrl)
@@ -42,8 +45,11 @@ const testTables = [
   "tag_events",
   "tags",
   "assets",
+  "role_view_scope_audit",
+  "role_view_scopes",
   "route_stage_hop_permissions",
   "stages",
+  "units",
   "routes",
   "tenant_roles",
   "tag_batches",
@@ -193,9 +199,16 @@ async function seedMinimalDraft(): Promise<MinimalSeed> {
   };
 }
 
+let loginRequestSequence = 0;
+
 async function tokenForCredentials(email: string, password: string): Promise<string> {
+  // Login fixtures are independent principals. Give each a deterministic test
+  // client IP so fixture volume cannot exhaust one shared mock-throttler bucket.
+  loginRequestSequence += 1;
+  const testIp = `198.18.${Math.floor(loginRequestSequence / 250)}.${(loginRequestSequence % 250) + 1}`;
   const response = await request(app.getHttpServer())
     .post("/v1/auth/login")
+    .set("X-Forwarded-For", testIp)
     .send({ email, password })
     .expect(201);
   return response.body.accessToken as string;
@@ -374,6 +387,8 @@ beforeAll(async () => {
     "023_asset_subject_and_public_projection.sql",
     "024_route_stage_tenant_roles_and_hop_authority.sql",
     "025_stage_change_event_pair_backstop.sql",
+    "026_operational_units_and_view_scopes.sql",
+    "027_stage_placement_start_stage_backstop.sql",
   ]);
   await rehydrateConditionCatalog();
   const conditionFields = await db.query(
@@ -431,7 +446,12 @@ beforeAll(async () => {
       "tags_code_no_update",
     ]),
   );
-  const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
+  // The approved integration gate uses a shared Redis mock. Redis connectivity
+  // remains a separately documented production-hardening gap.
+  const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+    .overrideProvider(REDIS_CLIENT_TOKEN)
+    .useValue(new RedisMock() as unknown as Redis)
+    .compile();
   app = moduleRef.createNestApplication();
   configureApi(app);
   await app.init();
@@ -466,7 +486,7 @@ describe("Rescue ID live PostgreSQL integration boundary", () => {
     const privateResponse = await request(app.getHttpServer())
       .get(`/v1/public/scan/${data.tagCode}`)
       .expect(200);
-    expect(privateResponse.body).toMatchObject({ status: "available", fields: [] });
+    expect(privateResponse.body).toEqual({ status: "tag_unavailable" });
 
     await db.query(
       "INSERT INTO ward_field_visibility(ward_id, field_catalog_id, visibility, updated_by) VALUES ($1, $2, 'public', $3)",
@@ -476,17 +496,17 @@ describe("Rescue ID live PostgreSQL integration boundary", () => {
       "UPDATE field_catalog SET approved = false, public_eligible = false WHERE id = $1",
       [data.fieldId],
     );
-    expect(
-      (await request(app.getHttpServer()).get(`/v1/public/scan/${data.tagCode}`)).body.fields,
-    ).toEqual([]);
+    await request(app.getHttpServer())
+      .get(`/v1/public/scan/${data.tagCode}`)
+      .expect({ status: "tag_unavailable" });
 
     await db.query(
       "UPDATE field_catalog SET approved = true, public_eligible = false WHERE id = $1",
       [data.fieldId],
     );
-    expect(
-      (await request(app.getHttpServer()).get(`/v1/public/scan/${data.tagCode}`)).body.fields,
-    ).toEqual([]);
+    await request(app.getHttpServer())
+      .get(`/v1/public/scan/${data.tagCode}`)
+      .expect({ status: "tag_unavailable" });
 
     await db.query("UPDATE field_catalog SET public_eligible = true WHERE id = $1", [data.fieldId]);
     const released = await request(app.getHttpServer())
@@ -548,6 +568,9 @@ describe("Rescue ID live PostgreSQL integration boundary", () => {
         )
       ).rows[0].count,
     ).toBe(0);
+    await request(app.getHttpServer())
+      .get(`/v1/public/scan/${data.tagCode}`)
+      .expect({ status: "tag_unavailable" });
   });
 
   it("enforces append-only consent audit triggers in PostgreSQL", async () => {
@@ -864,7 +887,7 @@ describe("Rescue ID live PostgreSQL integration boundary", () => {
     const privateScan = await request(app.getHttpServer())
       .get(`/v1/public/scan/${data.tagCode}`)
       .expect(200);
-    expect(privateScan.body.fields).toEqual([]);
+    expect(privateScan.body).toEqual({ status: "tag_unavailable" });
 
     for (const fieldId of [flagsId, notesId]) {
       await request(app.getHttpServer())
@@ -921,14 +944,16 @@ describe("Rescue ID live PostgreSQL integration boundary", () => {
   });
 
   it("records a keyed IP pseudonym but never raw scan data in PostgreSQL", async () => {
-    const data = await seed();
+    // A scan log exists only after the tag crosses the public consent boundary.
+    // An unreleased tag is intentionally indistinguishable from an unavailable one.
+    const data = await seed({ visibility: "public" });
     await request(app.getHttpServer()).get(`/v1/public/scan/${data.tagCode}`).expect(200);
     const result = await db.query(
       "SELECT shown_field_keys, scanner_ip_hmac FROM scan_log WHERE tag_id = (SELECT id FROM tags WHERE code = $1)",
       [data.tagCode],
     );
     expect(result.rows).toHaveLength(1);
-    expect(result.rows[0].shown_field_keys).toEqual([]);
+    expect(result.rows[0].shown_field_keys).toEqual(["blood_group"]);
     expect(result.rows[0].scanner_ip_hmac).toMatch(/^[a-f0-9]{64}$/);
     expect(JSON.stringify(result.rows[0])).not.toContain("127.0.0.1");
   });
@@ -3170,6 +3195,668 @@ describe("Rescue ID live PostgreSQL integration boundary", () => {
           [fixture.tagId, fixture.actorId, fixture.fromStageId, fixture.toStageId],
         ),
       ).rejects.toThrow(/must not change inventory lifecycle status/);
+    });
+  });
+
+  describe("Stage tracking Step 1 operational units and view scopes", () => {
+    async function seedViewScopeFixture() {
+      const tenantId = "00000000-0000-4000-8000-000000000021";
+      const actorId = randomUUID();
+      const routeId = randomUUID();
+      const unitAId = randomUUID();
+      const unitBId = randomUUID();
+      const stageAId = randomUUID();
+      const stageBId = randomUUID();
+      const ownStageRoleId = randomUUID();
+      const unitRoleId = randomUUID();
+      const tenantRoleId = randomUUID();
+
+      await db.query(
+        `INSERT INTO users(id, name, email, password_hash, role, tenant_id)
+         VALUES($1, 'Scope admin', $2, 'hash', 'company_admin', $3)`,
+        [actorId, `${actorId}@example.test`, tenantId],
+      );
+      await db.query(
+        `INSERT INTO tenant_roles(id, tenant_id, name, authority_class) VALUES
+          ($1, $4, 'Stage staff', 'operational_staff'),
+          ($2, $4, 'Unit lead', 'operational_staff'),
+          ($3, $4, 'Tenant admin', 'admin')`,
+        [ownStageRoleId, unitRoleId, tenantRoleId, tenantId],
+      );
+      await db.query(
+        "INSERT INTO routes(id, tenant_id, name) VALUES($1, $2, 'Scope route')",
+        [routeId, tenantId],
+      );
+      await db.query(
+        "INSERT INTO units(id, tenant_id, name) VALUES($1, $3, 'Unit A'), ($2, $3, 'Unit B')",
+        [unitAId, unitBId, tenantId],
+      );
+      await db.query(
+        `INSERT INTO stages(id, tenant_id, route_id, unit_id, name) VALUES
+          ($1, $5, $3, $4, 'A stage'),
+          ($2, $5, $3, $6, 'B stage')`,
+        [stageAId, stageBId, routeId, unitAId, tenantId, unitBId],
+      );
+      return { actorId, ownStageRoleId, unitRoleId, tenantRoleId, tenantId, unitAId, unitBId, stageAId, stageBId };
+    }
+
+    it("accepts exactly own-stage, unit, and tenant scope shapes and maps allowed stages server-side", async () => {
+      const fixture = await seedViewScopeFixture();
+      await db.query(
+        `INSERT INTO role_view_scopes(tenant_id, tenant_role_id, scope_kind, stage_id, granted_by_user_id)
+         VALUES($1, $2, 'own_stage', $3, $4)`,
+        [fixture.tenantId, fixture.ownStageRoleId, fixture.stageAId, fixture.actorId],
+      );
+      await db.query(
+        `INSERT INTO role_view_scopes(tenant_id, tenant_role_id, scope_kind, unit_id, granted_by_user_id)
+         VALUES($1, $2, 'unit', $3, $4)`,
+        [fixture.tenantId, fixture.unitRoleId, fixture.unitAId, fixture.actorId],
+      );
+      await db.query(
+        `INSERT INTO role_view_scopes(tenant_id, tenant_role_id, scope_kind, granted_by_user_id)
+         VALUES($1, $2, 'tenant', $3)`,
+        [fixture.tenantId, fixture.tenantRoleId, fixture.actorId],
+      );
+
+      await expect(
+        db.query(
+          "INSERT INTO role_view_scopes(tenant_id, tenant_role_id, scope_kind, granted_by_user_id) VALUES($1, $2, 'unit', $3)",
+          [fixture.tenantId, randomUUID(), fixture.actorId],
+        ),
+      ).rejects.toThrow();
+
+      await expect(
+        db.query(
+          `SELECT stage_id FROM role_view_scope_allowed_stages
+           WHERE tenant_role_id = $1 AND tenant_id = $2 ORDER BY stage_id`,
+          [fixture.unitRoleId, fixture.tenantId],
+        ),
+      ).resolves.toMatchObject({ rows: [{ stage_id: fixture.stageAId }] });
+      const unitStages = await db.query<{ stage_id: string }>(
+        `SELECT stage_id FROM role_view_scope_allowed_stages
+         WHERE tenant_role_id = $1 AND tenant_id = $2`,
+        [fixture.unitRoleId, fixture.tenantId],
+      );
+      expect(unitStages.rows.map((row) => row.stage_id)).not.toContain(fixture.stageBId);
+
+      await expect(
+        db.query(
+          `SELECT stage_id FROM role_view_scope_allowed_stages
+           WHERE tenant_role_id = $1 AND tenant_id = $2 ORDER BY stage_id`,
+          [fixture.tenantRoleId, fixture.tenantId],
+        ),
+      ).resolves.toMatchObject({
+        rows: expect.arrayContaining([{ stage_id: fixture.stageAId }, { stage_id: fixture.stageBId }]),
+      });
+    });
+
+    it("blocks cross-tenant scope links and records append-only grant and revoke audit events", async () => {
+      const fixture = await seedViewScopeFixture();
+      const scope = await db.query<{ id: string }>(
+        `INSERT INTO role_view_scopes(tenant_id, tenant_role_id, scope_kind, unit_id, granted_by_user_id)
+         VALUES($1, $2, 'unit', $3, $4) RETURNING id`,
+        [fixture.tenantId, fixture.unitRoleId, fixture.unitAId, fixture.actorId],
+      );
+      const scopeId = scope.rows[0]!.id;
+      const otherTenantId = (
+        await db.query<{ id: string }>(
+          "INSERT INTO tenants(name, type) VALUES($1, 'hospital') RETURNING id",
+          [`Scope other tenant ${randomUUID()}`],
+        )
+      ).rows[0]!.id;
+      const otherUnitId = (
+        await db.query<{ id: string }>(
+          "INSERT INTO units(tenant_id, name) VALUES($1, 'Other unit') RETURNING id",
+          [otherTenantId],
+        )
+      ).rows[0]!.id;
+
+      await expect(
+        db.query(
+          `INSERT INTO role_view_scopes(tenant_id, tenant_role_id, scope_kind, unit_id, granted_by_user_id)
+           VALUES($1, $2, 'unit', $3, $4)`,
+          [fixture.tenantId, fixture.ownStageRoleId, otherUnitId, fixture.actorId],
+        ),
+      ).rejects.toMatchObject({ code: "23503" });
+
+      await db.query(
+        `UPDATE role_view_scopes
+         SET active = false, revoked_by_user_id = $3, revoked_at = now(), updated_at = now()
+         WHERE id = $1 AND tenant_id = $2`,
+        [scopeId, fixture.tenantId, fixture.actorId],
+      );
+      await expect(
+        db.query(
+          "SELECT event_type, actor_user_id FROM role_view_scope_audit WHERE scope_id = $1 ORDER BY created_at, id",
+          [scopeId],
+        ),
+      ).resolves.toMatchObject({
+        rows: [
+          { event_type: "granted", actor_user_id: fixture.actorId },
+          { event_type: "revoked", actor_user_id: fixture.actorId },
+        ],
+      });
+      await expect(
+        db.query("UPDATE role_view_scope_audit SET event_type = 'granted' WHERE scope_id = $1", [scopeId]),
+      ).rejects.toThrow(/append-only/);
+      await expect(db.query("DELETE FROM role_view_scopes WHERE id = $1", [scopeId])).rejects.toThrow(
+        /revoked, not deleted/,
+      );
+    });
+  });
+
+  describe("Stage tracking Step 2 scoped internal board", () => {
+    async function seedBoardFixture(tenantId = "00000000-0000-4000-8000-000000000021") {
+      const adminId = randomUUID();
+      const staffId = randomUUID();
+      const unitLeadId = randomUUID();
+      const password = "board-password";
+      const routeId = randomUUID();
+      const unitAId = randomUUID();
+      const unitBId = randomUUID();
+      const stageAId = randomUUID();
+      const stageBId = randomUUID();
+      const stageCId = randomUUID();
+      const staffRoleId = randomUUID();
+      const unitLeadRoleId = randomUUID();
+      const adminRoleId = randomUUID();
+      const staffEmail = `${staffId}@example.test`;
+      const unitLeadEmail = `${unitLeadId}@example.test`;
+      const adminEmail = `${adminId}@example.test`;
+
+      await db.query(
+        `INSERT INTO tenant_roles(id, tenant_id, name, authority_class) VALUES
+          ($1, $4, 'Board staff', 'operational_staff'),
+          ($2, $4, 'Board unit lead', 'operational_staff'),
+          ($3, $4, 'Board tenant admin', 'admin')`,
+        [staffRoleId, unitLeadRoleId, adminRoleId, tenantId],
+      );
+      const passwordHash = await bcrypt.hash(password, 4);
+      await db.query(
+        `INSERT INTO users(id, name, email, password_hash, role, tenant_id, tenant_role_id) VALUES
+          ($1, 'Board staff', $2, $7, 'staff', $6, $3),
+          ($4, 'Board unit lead', $5, $7, 'staff', $6, $8),
+          ($9, 'Board admin', $10, $7, 'company_admin', $6, $11)`,
+        [
+          staffId,
+          staffEmail,
+          staffRoleId,
+          unitLeadId,
+          unitLeadEmail,
+          tenantId,
+          passwordHash,
+          unitLeadRoleId,
+          adminId,
+          adminEmail,
+          adminRoleId,
+        ],
+      );
+      await db.query("INSERT INTO routes(id, tenant_id, name) VALUES($1, $2, 'Board route')", [
+        routeId,
+        tenantId,
+      ]);
+      await db.query(
+        "INSERT INTO units(id, tenant_id, name) VALUES($1, $3, 'Board unit A'), ($2, $3, 'Board unit B')",
+        [unitAId, unitBId, tenantId],
+      );
+      await db.query(
+        `INSERT INTO stages(id, tenant_id, route_id, unit_id, name) VALUES
+          ($1, $6, $4, $5, 'A1'),
+          ($2, $6, $4, $5, 'A2'),
+          ($3, $6, $4, $7, 'B1')`,
+        [stageAId, stageBId, stageCId, routeId, unitAId, tenantId, unitBId],
+      );
+      await db.query(
+        `INSERT INTO role_view_scopes(tenant_id, tenant_role_id, scope_kind, stage_id, granted_by_user_id) VALUES
+          ($1, $2, 'own_stage', $3, $4)`,
+        [tenantId, staffRoleId, stageAId, adminId],
+      );
+      await db.query(
+        `INSERT INTO role_view_scopes(tenant_id, tenant_role_id, scope_kind, unit_id, granted_by_user_id) VALUES
+          ($1, $2, 'unit', $3, $4)`,
+        [tenantId, unitLeadRoleId, unitAId, adminId],
+      );
+      await db.query(
+        `INSERT INTO role_view_scopes(tenant_id, tenant_role_id, scope_kind, granted_by_user_id) VALUES
+          ($1, $2, 'tenant', $3)`,
+        [tenantId, adminRoleId, adminId],
+      );
+
+      async function addTag(code: string, stageId: string | null) {
+        await db.query(
+          `INSERT INTO tags(code, category, category_id, form, inventory_status, holder_kind, current_stage_id, tenant_id)
+           VALUES($1, 'medical', (SELECT id FROM categories WHERE key = 'medical'), 'band', 'active', 'company', $2, $3)`,
+          [code, stageId, tenantId],
+        );
+      }
+      const tagA = `BOARD-A-${randomUUID()}`;
+      const tagB = `BOARD-B-${randomUUID()}`;
+      const tagC = `BOARD-C-${randomUUID()}`;
+      const unplacedTag = `BOARD-U-${randomUUID()}`;
+      await addTag(tagA, stageAId);
+      await addTag(tagB, stageBId);
+      await addTag(tagC, stageCId);
+      await addTag(unplacedTag, null);
+
+      return {
+        tenantId,
+        stageAId,
+        stageBId,
+        stageCId,
+        staffToken: await tokenForCredentials(staffEmail, password),
+        unitLeadToken: await tokenForCredentials(unitLeadEmail, password),
+        adminToken: await tokenForCredentials(adminEmail, password),
+        tagA,
+        tagB,
+        tagC,
+        unplacedTag,
+      };
+    }
+
+    function boardRequest(token: string) {
+      return request(app.getHttpServer())
+        .get("/v1/app/stage-tracking/board")
+        .set("Authorization", `Bearer ${token}`);
+    }
+
+    it("adds only the three permitted single-tenant ladder scopes and omits every consent field", async () => {
+      const fixture = await seedBoardFixture();
+
+      const staff = await boardRequest(fixture.staffToken).expect(200);
+      expect(staff.body).toEqual([
+        { tagCode: fixture.tagA, currentStage: { id: fixture.stageAId, name: "A1" } },
+      ]);
+
+      const unitLead = await boardRequest(fixture.unitLeadToken).expect(200);
+      expect(unitLead.body).toEqual(
+        expect.arrayContaining([
+          { tagCode: fixture.tagA, currentStage: { id: fixture.stageAId, name: "A1" } },
+          { tagCode: fixture.tagB, currentStage: { id: fixture.stageBId, name: "A2" } },
+        ]),
+      );
+      expect(unitLead.body.map((row: { tagCode: string }) => row.tagCode)).not.toContain(fixture.tagC);
+      expect(unitLead.body.map((row: { tagCode: string }) => row.tagCode)).not.toContain(fixture.unplacedTag);
+
+      const admin = await boardRequest(fixture.adminToken).expect(200);
+      expect(admin.body).toEqual(
+        expect.arrayContaining([
+          { tagCode: fixture.tagA, currentStage: { id: fixture.stageAId, name: "A1" } },
+          { tagCode: fixture.tagB, currentStage: { id: fixture.stageBId, name: "A2" } },
+          { tagCode: fixture.tagC, currentStage: { id: fixture.stageCId, name: "B1" } },
+          { tagCode: fixture.unplacedTag, currentStage: null },
+        ]),
+      );
+
+      for (const row of admin.body as Array<Record<string, unknown>>) {
+        expect(Object.keys(row).sort()).toEqual(["currentStage", "tagCode"]);
+        expect(JSON.stringify(row)).not.toMatch(/ward|guardian|consent|blood|allergy|condition|phone|address/i);
+      }
+    });
+
+    it("blocks a tenant-B administrator from receiving any tenant-A board row", async () => {
+      const tenantA = await seedBoardFixture();
+      const tenantBId = (
+        await db.query<{ id: string }>(
+          "INSERT INTO tenants(name, type) VALUES($1, 'hospital') RETURNING id",
+          [`Board tenant B ${randomUUID()}`],
+        )
+      ).rows[0]!.id;
+      const tenantB = await seedBoardFixture(tenantBId);
+
+      const boardB = await boardRequest(tenantB.adminToken).expect(200);
+      const returnedCodes = boardB.body.map((row: { tagCode: string }) => row.tagCode);
+      expect(returnedCodes).toEqual(
+        expect.arrayContaining([tenantB.tagA, tenantB.tagB, tenantB.tagC, tenantB.unplacedTag]),
+      );
+      expect(returnedCodes).not.toContain(tenantA.tagA);
+      expect(returnedCodes).not.toContain(tenantA.tagB);
+      expect(returnedCodes).not.toContain(tenantA.tagC);
+      expect(returnedCodes).not.toContain(tenantA.unplacedTag);
+    });
+  });
+
+  describe("Stage tracking Step 3 initial placement", () => {
+    async function seedPlacementFixture(tenantId = "00000000-0000-4000-8000-000000000021") {
+      const adminId = randomUUID();
+      const staffId = randomUUID();
+      const adminRoleId = randomUUID();
+      const staffRoleId = randomUUID();
+      const routeId = randomUUID();
+      const startStageId = randomUUID();
+      const otherStageId = randomUUID();
+      const tagCode = `PLACE-${randomUUID()}`;
+      const password = "placement-password";
+      const adminEmail = `${adminId}@example.test`;
+      const staffEmail = `${staffId}@example.test`;
+      const passwordHash = await bcrypt.hash(password, 4);
+
+      await db.query(
+        `INSERT INTO tenant_roles(id, tenant_id, name, authority_class) VALUES
+          ($1, $3, 'Placement admin', 'admin'),
+          ($2, $3, 'Placement staff', 'operational_staff')`,
+        [adminRoleId, staffRoleId, tenantId],
+      );
+      await db.query(
+        `INSERT INTO users(id, name, email, password_hash, role, tenant_id, tenant_role_id) VALUES
+          ($1, 'Placement admin', $2, $7, 'company_admin', $6, $3),
+          ($4, 'Placement staff', $5, $7, 'staff', $6, $8)`,
+        [adminId, adminEmail, adminRoleId, staffId, staffEmail, tenantId, passwordHash, staffRoleId],
+      );
+      await db.query("INSERT INTO routes(id, tenant_id, name) VALUES($1, $2, 'Placement route')", [
+        routeId,
+        tenantId,
+      ]);
+      await db.query(
+        `INSERT INTO stages(id, tenant_id, route_id, name) VALUES
+          ($1, $3, $4, 'Configured start'),
+          ($2, $3, $4, 'Not a start')`,
+        [startStageId, otherStageId, tenantId, routeId],
+      );
+      await db.query("UPDATE routes SET start_stage_id = $2 WHERE id = $1 AND tenant_id = $3", [
+        routeId,
+        startStageId,
+        tenantId,
+      ]);
+      const tag = await db.query<{ id: string }>(
+        `INSERT INTO tags(code, category, category_id, form, inventory_status, holder_kind, tenant_id)
+         VALUES($1, 'medical', (SELECT id FROM categories WHERE key = 'medical'), 'band', 'active', 'company', $2)
+         RETURNING id`,
+        [tagCode, tenantId],
+      );
+
+      return {
+        tenantId,
+        routeId,
+        startStageId,
+        otherStageId,
+        tagId: tag.rows[0]!.id,
+        tagCode,
+        adminId,
+        adminToken: await tokenForCredentials(adminEmail, password),
+        staffToken: await tokenForCredentials(staffEmail, password),
+      };
+    }
+
+    function placementRequest(token: string, tagCode: string, routeId: string) {
+      return request(app.getHttpServer())
+        .post(`/v1/admin/tags/${tagCode}/stage-placement`)
+        .set("Authorization", `Bearer ${token}`)
+        .send({ routeId });
+    }
+
+    it("permits only NULL-to-configured-start placement with one paired append-only event", async () => {
+      const fixture = await seedPlacementFixture();
+
+      // The extended 025 constraint rejects a raw NULL -> stage update without
+      // its same-transaction stage_placed event.
+      await expect(
+        db.query("UPDATE tags SET current_stage_id = $2 WHERE id = $1", [fixture.tagId, fixture.startStageId]),
+      ).rejects.toThrow(/requires a matching stage_placed event/);
+
+      const response = await placementRequest(fixture.adminToken, fixture.tagCode, fixture.routeId).expect(201);
+      expect(response.body).toMatchObject({
+        success: true,
+        code: fixture.tagCode,
+        stageId: fixture.startStageId,
+      });
+
+      await expect(
+        db.query("SELECT current_stage_id FROM tags WHERE id = $1", [fixture.tagId]),
+      ).resolves.toMatchObject({ rows: [{ current_stage_id: fixture.startStageId }] });
+      const events = await db.query(
+        `SELECT event_type, actor_user_id, from_stage_id, to_stage_id, from_status, to_status
+         FROM tag_events WHERE tag_id = $1`,
+        [fixture.tagId],
+      );
+      expect(events.rows).toEqual([
+        {
+          event_type: "stage_placed",
+          actor_user_id: fixture.adminId,
+          from_stage_id: null,
+          to_stage_id: fixture.startStageId,
+          from_status: "active",
+          to_status: "active",
+        },
+      ]);
+      await expect(
+        db.query("UPDATE tag_events SET event_type = 'stage_moved' WHERE tag_id = $1", [fixture.tagId]),
+      ).rejects.toThrow(/append-only/);
+    });
+
+    it("rejects a paired placement event aimed at any stage other than the configured start", async () => {
+      const fixture = await seedPlacementFixture();
+      const client = await db.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query("UPDATE tags SET current_stage_id = $2 WHERE id = $1", [
+          fixture.tagId,
+          fixture.otherStageId,
+        ]);
+        await expect(
+          client.query(
+            `INSERT INTO tag_events(
+               tag_id, event_type, actor_user_id, from_status, to_status, from_stage_id, to_stage_id
+             ) VALUES($1, 'stage_placed', $2, 'active', 'active', NULL, $3)`,
+            [fixture.tagId, fixture.adminId, fixture.otherStageId],
+          ),
+        ).rejects.toThrow(/permitted route stage/);
+      } finally {
+        await client.query("ROLLBACK").catch(() => undefined);
+        client.release();
+      }
+    });
+
+    it("rejects non-admin placement and leaves the tag unplaced with no event", async () => {
+      const fixture = await seedPlacementFixture();
+      await placementRequest(fixture.staffToken, fixture.tagCode, fixture.routeId).expect(403);
+      await expect(
+        db.query("SELECT current_stage_id FROM tags WHERE id = $1", [fixture.tagId]),
+      ).resolves.toMatchObject({ rows: [{ current_stage_id: null }] });
+      await expect(db.query("SELECT id FROM tag_events WHERE tag_id = $1", [fixture.tagId])).resolves.toMatchObject({
+        rows: [],
+      });
+    });
+
+    it("rejects a second placement rather than creating a placement back door", async () => {
+      const fixture = await seedPlacementFixture();
+      await placementRequest(fixture.adminToken, fixture.tagCode, fixture.routeId).expect(201);
+      await placementRequest(fixture.adminToken, fixture.tagCode, fixture.routeId).expect(409);
+      await expect(
+        db.query("SELECT count(*)::int AS count FROM tag_events WHERE tag_id = $1", [fixture.tagId]),
+      ).resolves.toMatchObject({ rows: [{ count: 1 }] });
+    });
+
+    it("rejects tenant-B admin placement of a tenant-A tag", async () => {
+      const tenantA = await seedPlacementFixture();
+      const tenantBId = (
+        await db.query<{ id: string }>(
+          "INSERT INTO tenants(name, type) VALUES($1, 'hospital') RETURNING id",
+          [`Placement tenant B ${randomUUID()}`],
+        )
+      ).rows[0]!.id;
+      const tenantB = await seedPlacementFixture(tenantBId);
+
+      await placementRequest(tenantB.adminToken, tenantA.tagCode, tenantA.routeId).expect(404);
+      await expect(
+        db.query("SELECT current_stage_id FROM tags WHERE id = $1", [tenantA.tagId]),
+      ).resolves.toMatchObject({ rows: [{ current_stage_id: null }] });
+      await expect(db.query("SELECT id FROM tag_events WHERE tag_id = $1", [tenantA.tagId])).resolves.toMatchObject({
+        rows: [],
+      });
+    });
+  });
+
+  describe("Stage tracking Step 4 bound staff tap", () => {
+    async function seedTapFixture(
+      tenantId = "00000000-0000-4000-8000-000000000021",
+      withBinding = true,
+      withHop = true,
+      initiallyPlaced = true,
+    ) {
+      const staffId = randomUUID();
+      const tenantRoleId = randomUUID();
+      const routeId = randomUUID();
+      const sourceStageId = randomUUID();
+      const boundStageId = randomUUID();
+      const tagCode = `TAP-${randomUUID()}`;
+      const password = "tap-password";
+      const email = `${staffId}@example.test`;
+      const passwordHash = await bcrypt.hash(password, 4);
+
+      await db.query(
+        `INSERT INTO tenant_roles(id, tenant_id, name, authority_class)
+         VALUES($1, $2, $3, 'operational_staff')`,
+        [tenantRoleId, tenantId, `Tap staff ${staffId}`],
+      );
+      await db.query(
+        `INSERT INTO users(id, name, email, password_hash, role, tenant_id, tenant_role_id)
+         VALUES($1, 'Tap staff', $2, $3, 'staff', $4, $5)`,
+        [staffId, email, passwordHash, tenantId, tenantRoleId],
+      );
+      await db.query("INSERT INTO routes(id, tenant_id, name) VALUES($1, $2, $3)", [
+        routeId,
+        tenantId,
+        `Tap route ${routeId}`,
+      ]);
+      await db.query(
+        `INSERT INTO stages(id, tenant_id, route_id, name) VALUES
+          ($1, $3, $4, 'Before tap'),
+          ($2, $3, $4, 'Staff bound stage')`,
+        [sourceStageId, boundStageId, tenantId, routeId],
+      );
+      if (withBinding) {
+        await db.query(
+          `INSERT INTO role_view_scopes(tenant_id, tenant_role_id, scope_kind, stage_id, granted_by_user_id)
+           VALUES($1, $2, 'own_stage', $3, $4)`,
+          [tenantId, tenantRoleId, boundStageId, staffId],
+        );
+      }
+      if (withHop) {
+        await db.query(
+          `INSERT INTO route_stage_hop_permissions(
+             tenant_id, route_id, from_stage_id, to_stage_id, allowed_tenant_role_id
+           ) VALUES($1, $2, $3, $4, $5)`,
+          [tenantId, routeId, sourceStageId, boundStageId, tenantRoleId],
+        );
+      }
+      const tag = await db.query<{ id: string }>(
+        `INSERT INTO tags(
+           code, category, category_id, form, inventory_status, holder_kind, current_stage_id, tenant_id
+         ) VALUES(
+           $1, 'medical', (SELECT id FROM categories WHERE key = 'medical'), 'band', 'active', 'company', $2, $3
+         ) RETURNING id`,
+        [tagCode, initiallyPlaced ? sourceStageId : null, tenantId],
+      );
+
+      return {
+        tenantId,
+        staffId,
+        tenantRoleId,
+        routeId,
+        sourceStageId,
+        boundStageId,
+        tagId: tag.rows[0]!.id,
+        tagCode,
+        token: await tokenForCredentials(email, password),
+      };
+    }
+
+    function tapRequest(token: string, tagCode: string) {
+      return request(app.getHttpServer())
+        .post(`/v1/app/stage-tracking/tags/${tagCode}/tap`)
+        .set("Authorization", `Bearer ${token}`);
+    }
+
+    it("uses the staff own-stage binding and the existing hop authority to append one stage_moved event", async () => {
+      const fixture = await seedTapFixture();
+      await tapRequest(fixture.token, fixture.tagCode).expect(201, { success: true });
+
+      await expect(
+        db.query("SELECT current_stage_id FROM tags WHERE id = $1", [fixture.tagId]),
+      ).resolves.toMatchObject({ rows: [{ current_stage_id: fixture.boundStageId }] });
+      const events = await db.query(
+        `SELECT event_type, actor_user_id, from_stage_id, to_stage_id, metadata
+         FROM tag_events WHERE tag_id = $1`,
+        [fixture.tagId],
+      );
+      expect(events.rows).toEqual([
+        expect.objectContaining({
+          event_type: "stage_moved",
+          actor_user_id: fixture.staffId,
+          from_stage_id: fixture.sourceStageId,
+          to_stage_id: fixture.boundStageId,
+          metadata: expect.objectContaining({ method: "staff_stage_tap" }),
+        }),
+      ]);
+      await expect(
+        db.query("UPDATE tag_events SET event_type = 'stage_placed' WHERE tag_id = $1", [fixture.tagId]),
+      ).rejects.toThrow(/append-only/);
+    });
+
+    it("rejects an unplaced tag neutrally and leaves it unplaced without an event", async () => {
+      const fixture = await seedTapFixture(undefined, true, true, false);
+      const response = await tapRequest(fixture.token, fixture.tagCode).expect(404);
+      expect(response.body).toEqual({ statusCode: 404, message: "Tap unavailable", error: "Not Found" });
+      await expect(
+        db.query("SELECT current_stage_id FROM tags WHERE id = $1", [fixture.tagId]),
+      ).resolves.toMatchObject({ rows: [{ current_stage_id: null }] });
+      await expect(db.query("SELECT id FROM tag_events WHERE tag_id = $1", [fixture.tagId])).resolves.toMatchObject({
+        rows: [],
+      });
+    });
+
+    it("returns the same neutral failure for an unbound staff role and a disallowed hop", async () => {
+      const unbound = await seedTapFixture(undefined, false, true);
+      const noHop = await seedTapFixture(undefined, true, false);
+      const adminId = randomUUID();
+      const adminRoleId = randomUUID();
+      const adminEmail = `${adminId}@example.test`;
+      const adminPassword = "tap-admin-password";
+      await db.query(
+        `INSERT INTO tenant_roles(id, tenant_id, name, authority_class)
+         VALUES($1, $2, $3, 'admin')`,
+        [adminRoleId, unbound.tenantId, `Tap admin ${adminId}`],
+      );
+      await db.query(
+        `INSERT INTO users(id, name, email, password_hash, role, tenant_id, tenant_role_id)
+         VALUES($1, 'Tap admin', $2, $3, 'company_admin', $4, $5)`,
+        [adminId, adminEmail, await bcrypt.hash(adminPassword, 4), unbound.tenantId, adminRoleId],
+      );
+
+      const unboundResponse = await tapRequest(unbound.token, unbound.tagCode).expect(404);
+      const noHopResponse = await tapRequest(noHop.token, noHop.tagCode).expect(404);
+      const adminResponse = await tapRequest(
+        await tokenForCredentials(adminEmail, adminPassword),
+        unbound.tagCode,
+      ).expect(404);
+      expect(unboundResponse.body).toEqual({ statusCode: 404, message: "Tap unavailable", error: "Not Found" });
+      expect(noHopResponse.body).toEqual(unboundResponse.body);
+      expect(adminResponse.body).toEqual(unboundResponse.body);
+      await expect(
+        db.query("SELECT count(*)::int AS count FROM tag_events WHERE tag_id = ANY($1::uuid[])", [
+          [unbound.tagId, noHop.tagId],
+        ]),
+      ).resolves.toMatchObject({ rows: [{ count: 0 }] });
+    });
+
+    it("returns the same neutral failure to a tenant-B staff member probing a tenant-A tag", async () => {
+      const tenantA = await seedTapFixture();
+      const tenantBId = (
+        await db.query<{ id: string }>(
+          "INSERT INTO tenants(name, type) VALUES($1, 'hospital') RETURNING id",
+          [`Tap tenant B ${randomUUID()}`],
+        )
+      ).rows[0]!.id;
+      const tenantB = await seedTapFixture(tenantBId);
+
+      const response = await tapRequest(tenantB.token, tenantA.tagCode).expect(404);
+      expect(response.body).toEqual({ statusCode: 404, message: "Tap unavailable", error: "Not Found" });
+      await expect(
+        db.query("SELECT current_stage_id FROM tags WHERE id = $1", [tenantA.tagId]),
+      ).resolves.toMatchObject({ rows: [{ current_stage_id: tenantA.sourceStageId }] });
+      await expect(db.query("SELECT id FROM tag_events WHERE tag_id = $1", [tenantA.tagId])).resolves.toMatchObject({
+        rows: [],
+      });
     });
   });
 

@@ -114,44 +114,118 @@ export class TagCustodyService {
       );
       const tag = tagResult.rows[0];
       if (!tag) throw new NotFoundException("Tag unavailable");
+      return this.moveStageLocked(client, actor, tenantId, tag, fromStageId, toStageId, "staff_hop");
+    });
+  }
+
+  /**
+   * The tap pathway deliberately reuses the same locked movement core as the
+   * explicit move API. Its caller obtains the destination from a server-side
+   * staff-stage binding; it never accepts or performs initial placement.
+   */
+  async tapToBoundStage(actor: AuthenticatedUser, tagCode: string): Promise<StageMoveResult> {
+    const tenantId = actor.tenantId;
+    if (!tenantId) throw new ForbiddenException("Tenant-scoped authentication is required");
+
+    return this.db.transaction(async (client) => {
+      const bindingResult = await client.query<{ stage_id: string }>(
+        `SELECT scope.stage_id
+         FROM users actor
+         JOIN tenant_roles role
+           ON role.id = actor.tenant_role_id
+          AND role.tenant_id = actor.tenant_id
+          AND role.active = true
+          AND role.authority_class = 'operational_staff'
+         JOIN role_view_scopes scope
+           ON scope.tenant_role_id = role.id
+          AND scope.tenant_id = actor.tenant_id
+          AND scope.active = true
+          AND scope.scope_kind = 'own_stage'
+         JOIN stages stage
+           ON stage.id = scope.stage_id
+          AND stage.tenant_id = actor.tenant_id
+          AND stage.active = true
+         WHERE actor.id = $1
+           AND actor.tenant_id = $2
+           AND actor.status = 'active'
+           AND actor.role = 'staff'
+         FOR SHARE OF actor, role, scope, stage`,
+        [actor.id, tenantId],
+      );
+      const binding = bindingResult.rows[0];
+      if (!binding) throw new ForbiddenException("No active staff-stage binding");
+
+      const tagResult = await client.query<LockedStageTagRow>(
+        `SELECT id, code, tenant_id, inventory_status, holder_kind, current_stage_id
+         FROM tags
+         WHERE upper(code) = upper($1) AND tenant_id = $2
+         FOR UPDATE`,
+        [normalizeTagCode(tagCode), tenantId],
+      );
+      const tag = tagResult.rows[0];
+      if (!tag) throw new NotFoundException("Tag unavailable");
       if (!tag.current_stage_id)
         throw new BadRequestException("Tag is not currently placed on a route stage");
-      if (tag.current_stage_id !== fromStageId)
-        throw new ConflictException("Tag stage has changed; refresh before moving it");
 
-      await this.assertMayMoveStageLocked(client, actor.id, tenantId, tag, fromStageId, toStageId);
-
-      const update = await client.query<{ id: string }>(
-        `UPDATE tags
-         SET current_stage_id = $2
-         WHERE id = $1 AND tenant_id = $3 AND current_stage_id = $4
-         RETURNING id`,
-        [tag.id, toStageId, tenantId, fromStageId],
+      return this.moveStageLocked(
+        client,
+        actor,
+        tenantId,
+        tag,
+        tag.current_stage_id,
+        binding.stage_id,
+        "staff_stage_tap",
       );
-      if (!update.rowCount)
-        throw new ConflictException("Tag stage has changed; refresh before moving it");
-
-      // This event is intentionally written after the tag update: migration 024
-      // validates that current_stage_id already equals to_stage_id and that the
-      // lifecycle status has not changed.
-      const event = await client.query<{ id: string }>(
-        `INSERT INTO tag_events(
-           tag_id, event_type, actor_user_id, from_status, to_status,
-           from_stage_id, to_stage_id, metadata
-         )
-         VALUES($1, 'stage_moved', $2, $3, $3, $4, $5, jsonb_build_object('method', 'staff_hop'))
-         RETURNING id`,
-        [tag.id, actor.id, tag.inventory_status, fromStageId, toStageId],
-      );
-
-      return {
-        success: true,
-        code: tag.code,
-        fromStageId,
-        toStageId,
-        eventId: event.rows[0]!.id,
-      };
     });
+  }
+
+  private async moveStageLocked(
+    client: PoolClient,
+    actor: AuthenticatedUser,
+    tenantId: string,
+    tag: LockedStageTagRow,
+    fromStageId: string,
+    toStageId: string,
+    method: "staff_hop" | "staff_stage_tap",
+  ): Promise<StageMoveResult> {
+    if (!tag.current_stage_id)
+      throw new BadRequestException("Tag is not currently placed on a route stage");
+    if (tag.current_stage_id !== fromStageId)
+      throw new ConflictException("Tag stage has changed; refresh before moving it");
+    if (fromStageId === toStageId) throw new BadRequestException("Stage move must change stage");
+
+    await this.assertMayMoveStageLocked(client, actor.id, tenantId, tag, fromStageId, toStageId);
+
+    const update = await client.query<{ id: string }>(
+      `UPDATE tags
+       SET current_stage_id = $2
+       WHERE id = $1 AND tenant_id = $3 AND current_stage_id = $4
+       RETURNING id`,
+      [tag.id, toStageId, tenantId, fromStageId],
+    );
+    if (!update.rowCount)
+      throw new ConflictException("Tag stage has changed; refresh before moving it");
+
+    // This event is intentionally written after the tag update: migration 024
+    // validates that current_stage_id already equals to_stage_id and that the
+    // lifecycle status has not changed.
+    const event = await client.query<{ id: string }>(
+      `INSERT INTO tag_events(
+         tag_id, event_type, actor_user_id, from_status, to_status,
+         from_stage_id, to_stage_id, metadata
+       )
+       VALUES($1, 'stage_moved', $2, $3, $3, $4, $5, jsonb_build_object('method', $6::text))
+       RETURNING id`,
+      [tag.id, actor.id, tag.inventory_status, fromStageId, toStageId, method],
+    );
+
+    return {
+      success: true,
+      code: tag.code,
+      fromStageId,
+      toStageId,
+      eventId: event.rows[0]!.id,
+    };
   }
 
   private async assertMayMoveStageLocked(

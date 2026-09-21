@@ -25,6 +25,10 @@ export class UpdateRouteDto {
   @IsOptional()
   @IsBoolean()
   active?: boolean;
+
+  @IsOptional()
+  @IsUUID()
+  startStageId?: string;
 }
 
 export class CreateStageDto {

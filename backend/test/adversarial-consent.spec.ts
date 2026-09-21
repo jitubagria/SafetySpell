@@ -133,10 +133,13 @@ describe("Rescue ID V1 adversarial consent boundary", () => {
       fields: [],
     });
 
-    await new ScanResolverService(repo, hashIp()).resolve("person-opaque-code");
+    await expect(
+      new ScanResolverService(repo, hashIp()).resolve("person-opaque-code"),
+    ).resolves.toEqual({ status: "tag_unavailable" });
 
     expect(repo.getFilteredPublicProjection).toHaveBeenCalledWith("ward-1");
     expect(repo.getAssetPublicProjection).not.toHaveBeenCalled();
+    expect(repo.writeScanLog).not.toHaveBeenCalled();
   });
 
   it("keeps an asset tag neutral if its server-side allowlist projection is empty", async () => {
@@ -578,7 +581,7 @@ describe("Rescue ID V1 adversarial consent boundary", () => {
     const privateScan = await service.resolve("known-long-legacy-code");
     const releasedScan = await service.resolve("known-long-legacy-code");
 
-    expect(privateScan).toEqual(expect.objectContaining({ fields: [] }));
+    expect(privateScan).toEqual({ status: "tag_unavailable" });
     expect(releasedScan).toEqual(
       expect.objectContaining({ fields: [expect.objectContaining({ key: "condition_flags" })] }),
     );
