@@ -43,6 +43,12 @@ export interface ApiScanResponse {
   disclaimer?: string;
 }
 
+/** The internal board contract intentionally contains no subject, consent, or health data. */
+export interface ApiStageTrackingBoardItem {
+  tagCode: string;
+  currentStage: { id: string; name: string } | null;
+}
+
 const configuredUrl = import.meta.env.VITE_CORE_API_URL?.replace(/\/$/, "");
 export const coreApiUrl =
   configuredUrl ?? (import.meta.env.DEV ? "http://localhost:3001" : undefined);
@@ -261,6 +267,22 @@ export function listInventory(
 
 export function scanTag(tagCode: string): Promise<ApiScanResponse> {
   return call<ApiScanResponse>(`/v1/public/scan/${encodeURIComponent(tagCode)}`);
+}
+
+export const stageTrackingQueryKeys = {
+  board: (token: string) => ["stage-tracking", "board", token] as const,
+};
+
+export function listStageTrackingBoard(token: string): Promise<ApiStageTrackingBoardItem[]> {
+  return call<ApiStageTrackingBoardItem[]>("/v1/app/stage-tracking/board", {}, token);
+}
+
+export function tapStageTrackingTag(token: string, tagCode: string): Promise<{ success: true }> {
+  return call<{ success: true }>(
+    `/v1/app/stage-tracking/tags/${encodeURIComponent(tagCode)}/tap`,
+    { method: "POST" },
+    token,
+  );
 }
 
 export interface ApiTagBatch {

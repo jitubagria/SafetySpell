@@ -11,6 +11,8 @@ import {
   getConsentAudit,
   revokeAdminTag,
   login,
+  listStageTrackingBoard,
+  tapStageTrackingTag,
 } from "./core-api";
 
 describe("core-api", () => {
@@ -121,6 +123,30 @@ describe("core-api", () => {
         expect.objectContaining({
           method: "POST",
           body: JSON.stringify({ email: "guardian@example.com", password: "password123456" }),
+        }),
+      );
+    });
+
+    it("loads the narrow internal stage board with authentication", async () => {
+      const board = [{ tagCode: "SS-BOARD-001", currentStage: { id: "stage-1", name: "Reception" } }];
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => board });
+
+      await expect(listStageTrackingBoard("staff-token")).resolves.toEqual(board);
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining("/v1/app/stage-tracking/board"),
+        expect.objectContaining({ headers: expect.objectContaining({ Authorization: "Bearer staff-token" }) }),
+      );
+    });
+
+    it("posts a real arrival tap with authentication", async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true }) });
+
+      await expect(tapStageTrackingTag("staff-token", "SS-BOARD-001")).resolves.toEqual({ success: true });
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining("/v1/app/stage-tracking/tags/SS-BOARD-001/tap"),
+        expect.objectContaining({
+          method: "POST",
+          headers: expect.objectContaining({ Authorization: "Bearer staff-token" }),
         }),
       );
     });
